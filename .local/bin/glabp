@@ -1,0 +1,114 @@
+#!/usr/bin/env zsh
+#
+# glabp - pass-backed wrapper for the GitLab CLI.
+#
+# Package:
+#   forge-cli-auth
+#
+# Purpose:
+#   Run `glab` with an OAuth-capable GitLab CLI config restored from
+#   password-store (`pass`) into a private temporary GLAB_CONFIG_DIR.
+#
+# In this package, a "forge" means a source-code collaboration platform
+# such as GitHub, GitLab, Gitea, Forgejo, SourceHut, or Bitbucket.
+#
+# Secret source:
+#   pass entry: tokens/gitlab/glab-oauth-config
+#
+# Runtime behavior:
+#   1. Create a private temporary directory.
+#   2. Restore config.yml from pass into that directory.
+#   3. Run `glab` with GLAB_CONFIG_DIR pointed at the temporary directory.
+#   4. If glab changed config.yml, write the updated config back to pass.
+#   5. Remove the temporary directory.
+#
+# Notes:
+#   - This wrapper treats config.yml as an opaque blob.
+#   - It does not parse, edit, or understand the glab config format.
+#   - It only writes back to pass if the config actually changed.
+#   - xtrace is disabled to reduce the risk of leaking credential material
+#     through shell debugging output.
+
+emulate -R zsh
+unsetopt xtrace
+umask 077
+
+PASS_ENTRY="tokens/gitlab/glab-oauth-config"
+CONFIG_NAME="config.yml"
+
+die() {
+  print -u2 -- "glabp: $*"
+  exit 1
+}
+
+warn() {
+  print -u2 -- "glabp: warning: $*"
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"
+}
+
+hash_file() {
+  local line
+
+  line="$(sha256sum -- "$1")" || return 1
+  print -r -- "${line%% *}"
+}
+
+cleanup() {
+  if [[ -n "${glab_tmp:-}" && -d "$glab_tmp" ]]; then
+    rm -rf -- "$glab_tmp"
+  fi
+}
+
+require_cmd pass
+require_cmd glab
+require_cmd mktemp
+require_cmd sha256sum
+
+runtime_base="${XDG_RUNTIME_DIR:-/tmp}"
+
+# Prefer XDG_RUNTIME_DIR when available, but fall back to /tmp if it is
+# missing, not a directory, or not writable.
+if [[ ! -d "$runtime_base" || ! -w "$runtime_base" ]]; then
+  runtime_base="/tmp"
+fi
+
+glab_tmp="$(mktemp -d "${runtime_base%/}/glab-pass.XXXXXX")" \
+  || die "failed to create temporary config directory"
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+config_file="$glab_tmp/$CONFIG_NAME"
+
+chmod 700 "$glab_tmp" || die "failed to secure temporary config directory"
+
+pass show "$PASS_ENTRY" >"$config_file" \
+  || die "failed to read GitLab config from pass: $PASS_ENTRY"
+
+chmod 600 "$config_file" || die "failed to secure temporary config file"
+
+before_hash="$(hash_file "$config_file")" \
+  || die "failed to hash restored GitLab config"
+
+GLAB_CONFIG_DIR="$glab_tmp" command glab "$@"
+glab_status=$?
+
+if [[ ! -s "$config_file" ]]; then
+  warn "temporary GitLab config is missing or empty after glab exited; not persisting"
+  exit "$glab_status"
+fi
+
+after_hash="$(hash_file "$config_file")" \
+  || die "failed to hash updated GitLab config"
+
+if [[ "$after_hash" != "$before_hash" ]]; then
+  pass insert --force --multiline "$PASS_ENTRY" <"$config_file" >/dev/null \
+    || die "glab changed config, but updated config could not be persisted to pass"
+fi
+
+exit "$glab_status"
