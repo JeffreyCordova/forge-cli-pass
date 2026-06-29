@@ -1,37 +1,142 @@
 # Forge CLI Auth Wrappers
 
-`forge-cli-auth` is a small dotfiles package that provides pass-backed
-authentication wrappers for source-code forge CLIs.
-
-In this context, a **forge** means a source-code collaboration platform such as
-GitHub, GitLab, Gitea, Forgejo, SourceHut, or Bitbucket.
+`forge-cli-auth` is a small dotfiles package for running forge CLIs with
+credentials restored from `pass` only when needed.
 
 The current wrappers are:
 
-- `ghp` — pass-backed wrapper for GitHub CLI, `gh`
-- `glabp` — pass-backed wrapper for GitLab CLI, `glab`
+| Wrapper | Underlying CLI | Secret source | Runtime credential path |
+|---|---|---|---|
+| `ghp` | GitHub CLI, `gh` | `tokens/github/gh-oauth` | `GH_TOKEN` for the child `gh` process |
+| `glabp` | GitLab CLI, `glab` | `tokens/gitlab/glab-oauth-config` | private temporary `GLAB_CONFIG_DIR` |
 
-The goal is to keep GitHub/GitLab CLI authentication out of the normal `gh` and
-`glab` config locations while still making the tools convenient to use from the
-terminal.
+In this document, a **forge** means a source-code collaboration platform such
+as GitHub, GitLab, Gitea, Forgejo, SourceHut, or Bitbucket.
 
-## Commands
+## Why this exists
+
+The normal GitHub and GitLab CLIs are designed for convenience. They often keep
+long-lived authentication state in default config directories such as
+`~/.config/gh` or `~/.config/glab-cli`.
+
+That is fine for many systems. This package chooses a narrower operating model:
+
+- keep the durable credential material in `pass`
+- keep default CLI config locations clean
+- restore credentials only for the command being run
+- delete transient GitLab CLI config after each invocation
+- keep the wrappers simple enough to audit at a glance
+
+The result is not a vault, sandbox, or high-assurance isolation boundary. It is a
+small credential-handling shim with deliberately limited scope.
+
+## Design principles
+
+1. **Prefer explicit credential boundaries.**
+   The durable source of authentication state is the password store, not the
+   forge CLI's default config directory.
+
+2. **Minimize persistent local residue.**
+   `ghp` does not write a GitHub CLI config. `glabp` restores GitLab CLI config
+   to a temporary directory and removes it when the command exits.
+
+3. **Do not parse secrets unless necessary.**
+   `ghp` extracts only the first line of the GitHub token entry. `glabp` treats
+   `config.yml` as an opaque blob.
+
+4. **Make mutation visible.**
+   `glabp` hashes the restored GitLab config before and after running `glab`,
+   and writes the config back to `pass` only if it changed.
+
+5. **Preserve the underlying CLI behavior.**
+   The wrappers do not reimplement `gh` or `glab`. Arguments are forwarded
+   directly to the real CLI binaries.
+
+6. **Fail closed where failure is obvious.**
+   Missing dependencies, unreadable pass entries, empty GitHub tokens, and
+   missing GitLab configs are treated as hard errors.
+
+## Security posture
+
+### What this protects against
+
+This package is intended to reduce these risks:
+
+- accidentally leaving GitHub or GitLab CLI auth state in the default config
+  directories
+- committing CLI config files or OAuth material into dotfiles
+- confusing wrapper-managed credentials with normal CLI login state
+- leaving a reusable GitLab CLI config directory behind after each command
+- leaking tokens through shell xtrace from the wrapper itself
+
+### What this does not protect against
+
+This package does **not** protect against:
+
+- a compromised local user account
+- a compromised `pass` store or exposed GPG private key
+- a malicious or compromised `gh`, `glab`, `git`, `pass`, shell, terminal,
+  kernel, or filesystem
+- process inspection by a sufficiently privileged local actor
+- malicious `gh` or `glab` extensions invoked through the wrappers
+- secrets already present in repository files, commit history, shell history,
+  logs, editor swap files, or terminal scrollback
+- Git SSH authentication problems
+
+The wrappers authenticate the forge CLIs. They do not manage Git remotes, SSH
+keys, deploy keys, signing keys, repository permissions, branch protection, or
+host trust.
+
+## Threat model
+
+### Trusted
+
+The wrappers assume the following are trustworthy enough for local use:
+
+- the local user account
+- the `pass` password store
+- the GPG private key protecting the password store
+- the installed `gh`, `glab`, `git`, `pass`, `zsh`, and `coreutils` binaries
+- the shell environment from which the wrappers are invoked
+
+### Untrusted or uncontrolled
+
+The wrappers do not assume that the default CLI config directories are suitable
+for long-term credential storage.
+
+They also do not attempt to control:
+
+- what `gh` or `glab` may do internally during command execution
+- what remote forge services do after authentication
+- what Git does over SSH or HTTPS
+- repository contents being pushed
+- extensions or plugins loaded by the underlying CLIs
+
+### Security invariant
+
+The intended invariant is:
+
+> Durable forge CLI credential material lives in `pass`; runtime credential
+> material exists only for the duration and scope required by the invoked CLI
+> command.
+
+That invariant is operational, not absolute. On a compromised machine, the
+credential can still be observed at runtime.
+
+## Components
 
 ### `ghp`
 
-`ghp` is a wrapper around `gh`.
+`ghp` is a pass-backed wrapper around the GitHub CLI.
 
-It reads a GitHub token from:
+It reads this pass entry:
 
 ```text
 tokens/github/gh-oauth
 ```
 
-Then it runs `gh` with that token provided through `GH_TOKEN`.
-
-Only the first line of the pass entry is used. This allows the pass entry to use
-the common password-store convention where the first line is the secret and
-later lines contain notes or metadata.
+Only the first line is used as the GitHub token. Later lines may contain notes
+or metadata.
 
 Example pass entry:
 
@@ -41,16 +146,19 @@ host: github.com
 purpose: GitHub CLI wrapper token
 ```
 
-Implementation notes:
+At runtime, `ghp`:
 
-- runs under `zsh`
-- uses `emulate -R zsh`
-- disables shell xtrace with `unsetopt xtrace`
-- sets `umask 077`
-- requires `pass` and `gh`
-- calls the real command with `command gh "$@"`
+1. runs under `zsh`
+2. resets zsh behavior with `emulate -R zsh`
+3. disables shell tracing with `unsetopt xtrace`
+4. sets `umask 077`
+5. requires `pass` and `gh`
+6. reads the token from `pass`
+7. extracts the first line
+8. rejects an empty token
+9. invokes the real CLI with `GH_TOKEN="$token" command gh "$@"`
 
-Example usage:
+Typical read-only checks:
 
 ```sh
 ghp auth status
@@ -61,39 +169,35 @@ ghp api user
 
 ### `glabp`
 
-`glabp` is a wrapper around `glab`.
+`glabp` is a pass-backed wrapper around the GitLab CLI.
 
-It reads a complete GitLab CLI config file from:
+It reads this pass entry:
 
 ```text
 tokens/gitlab/glab-oauth-config
 ```
 
-At runtime, it:
+This entry contains a complete GitLab CLI `config.yml`, not merely a token.
 
-1. Chooses a runtime base directory from `XDG_RUNTIME_DIR`, falling back to
-   `/tmp` if needed.
-2. Creates a private temporary directory named like `glab-pass.XXXXXX`.
-3. Restores the saved `config.yml` into that directory.
-4. Secures the directory with mode `700` and the config file with mode `600`.
-5. Hashes the restored `config.yml`.
-6. Runs `glab` with `GLAB_CONFIG_DIR` pointed at the temporary directory.
-7. Hashes `config.yml` again after `glab` exits.
-8. Writes the updated config back to `pass` only if the config changed.
-9. Deletes the temporary directory on exit.
+At runtime, `glabp`:
 
-Implementation notes:
+1. runs under `zsh`
+2. resets zsh behavior with `emulate -R zsh`
+3. disables shell tracing with `unsetopt xtrace`
+4. sets `umask 077`
+5. requires `pass`, `glab`, `mktemp`, and `sha256sum`
+6. chooses `XDG_RUNTIME_DIR`, falling back to `/tmp` if needed
+7. creates a private temporary directory named like `glab-pass.XXXXXX`
+8. restores `config.yml` from `pass`
+9. applies directory mode `700` and config-file mode `600`
+10. hashes the restored config
+11. invokes the real CLI with `GLAB_CONFIG_DIR="$tmp" command glab "$@"`
+12. checks whether the config is still present and non-empty
+13. hashes the updated config
+14. writes the config back to `pass` only if it changed
+15. removes the temporary directory on exit
 
-- runs under `zsh`
-- uses `emulate -R zsh`
-- disables shell xtrace with `unsetopt xtrace`
-- sets `umask 077`
-- requires `pass`, `glab`, `mktemp`, and `sha256sum`
-- calls the real command with `command glab "$@"`
-- treats `config.yml` as an opaque file
-- does not parse or modify the GitLab CLI config itself
-
-Example usage:
+Typical read-only checks:
 
 ```sh
 glabp auth status
@@ -102,7 +206,7 @@ glabp mr list
 glabp pipeline list
 ```
 
-## Install
+## Installation
 
 This package is intended to be deployed with GNU Stow.
 
@@ -126,10 +230,10 @@ stow forge-cli-auth
 chmod 700 ~/.local/bin/ghp ~/.local/bin/glabp
 ```
 
-Make sure `~/.local/bin` is in `PATH`.
+Confirm that `~/.local/bin` is on `PATH`:
 
 ```sh
-echo "$PATH"
+printf '%s\n' "$PATH" | tr ':' '\n' | grep -Fx "$HOME/.local/bin"
 ```
 
 ## Dependencies
@@ -163,17 +267,11 @@ sudo pacman -S zsh pass github-cli glab coreutils
 
 `mktemp` and `sha256sum` are provided by `coreutils`.
 
-## Required pass entries
+## Secret setup
 
-### GitHub
+### GitHub token entry
 
-Required pass entry:
-
-```text
-tokens/github/gh-oauth
-```
-
-Create it manually:
+Create the required pass entry:
 
 ```sh
 pass insert tokens/github/gh-oauth
@@ -189,35 +287,32 @@ host: github.com
 purpose: GitHub CLI wrapper token
 ```
 
-`ghp` uses only the first line.
+Verify:
 
-### GitLab
-
-Required pass entry:
-
-```text
-tokens/gitlab/glab-oauth-config
+```sh
+ghp auth status
 ```
 
-This entry should contain the full `glab` `config.yml` content, not just a token.
+### GitLab config entry
 
-One way to bootstrap it is to authenticate `glab` once using a temporary config
-directory, then store that config in `pass`.
-
-Example:
+Create a temporary GitLab CLI config, authenticate once, then store the resulting
+`config.yml` in `pass`.
 
 ```sh
 tmp="$(mktemp -d)"
 chmod 700 "$tmp"
 
-GLAB_CONFIG_DIR="$tmp" glab auth login --hostname gitlab.com --web --git-protocol ssh
+GLAB_CONFIG_DIR="$tmp" glab auth login \
+  --hostname gitlab.com \
+  --web \
+  --git-protocol ssh
 
 pass insert --force --multiline tokens/gitlab/glab-oauth-config <"$tmp/config.yml"
 
 rm -rf "$tmp"
 ```
 
-After that, use:
+Verify:
 
 ```sh
 glabp auth status
@@ -225,19 +320,77 @@ glabp auth status
 
 ## Optional aliases
 
-These wrappers are intentionally named `ghp` and `glabp` so that normal `gh` and
+The wrappers are intentionally named `ghp` and `glabp` so that normal `gh` and
 `glab` remain available.
 
-If you want the pass-backed wrappers to be the default in interactive shells,
-add aliases separately:
+If the pass-backed wrappers should be the default in interactive shells, add
+aliases outside the wrapper scripts:
 
 ```zsh
 alias gh='ghp'
 alias glab='glabp'
 ```
 
-The wrappers themselves call the underlying commands with `command gh` and
-`command glab`, so these aliases do not cause recursion.
+The wrappers call the underlying commands with `command gh` and `command glab`,
+so these aliases do not recurse.
+
+## Operational safety checks
+
+Before using the repo-creation workflows below, run these checks when the
+repository matters.
+
+### Confirm wrapper authentication
+
+```sh
+ghp auth status
+glabp auth status
+```
+
+### Confirm Git SSH authentication
+
+```sh
+ssh -T git@github.com
+ssh -T git@gitlab.com
+```
+
+The wrappers do not replace SSH authentication. A working `ghp auth status` does
+not prove that `git push` will work.
+
+### Confirm the repository state
+
+```sh
+git status --short
+git branch --show-current
+git remote -v
+git log --oneline --decorate --max-count=5
+```
+
+### Look for obvious accidental secrets before first publish
+
+These checks are intentionally simple. They are not a substitute for secret
+scanning, but they catch common mistakes before the first public or private
+push.
+
+```sh
+git status --short
+git diff --cached --name-only
+git diff --cached --check
+```
+
+Also inspect files such as:
+
+```text
+.env
+.envrc
+*.key
+*.pem
+*_token*
+*_secret*
+config.yml
+```
+
+If any of those are intentionally local-only, add them to `.gitignore` before
+committing.
 
 ## Common workflows
 
@@ -250,8 +403,9 @@ These examples assume:
 - `NAMESPACE` means a GitLab user or group
 - `REPO` means the repository/project name
 
-For single-forge repositories, the conventional remote name is usually `origin`.
-For repositories pushed to both GitHub and GitLab, this README uses explicit
+For a single-forge repository, `origin` is conventional and usually fine.
+
+For a repository hosted on both GitHub and GitLab, this README uses explicit
 remote names:
 
 ```text
@@ -259,7 +413,7 @@ github
 gitlab
 ```
 
-That avoids ambiguity when the same local repository has two hosting remotes.
+That keeps day-to-day commands readable and avoids guessing what `origin` means.
 
 ### Start tracking an existing directory with Git
 
@@ -275,8 +429,8 @@ git add .
 git commit -m "Initial commit"
 ```
 
-If the repository already exists but the branch name is not `main`, rename the
-current branch:
+If the repository already exists but the current branch is not named `main`,
+rename it:
 
 ```sh
 git branch -M main
@@ -302,7 +456,11 @@ If the repository should live under the authenticated GitHub user account, omit
 `OWNER/`:
 
 ```sh
-ghp repo create REPO --private --source=. --remote=github --push
+ghp repo create REPO \
+  --private \
+  --source=. \
+  --remote=github \
+  --push
 ```
 
 Check the result:
@@ -313,9 +471,10 @@ git branch -vv
 ghp repo view OWNER/REPO
 ```
 
-### Create a GitLab repo from the current directory with `glabp`
+### Create a GitLab repo with `glabp`, then push
 
-Use this when you want `glab` to create the GitLab project, then push with Git.
+Use this when you want the GitLab CLI to create the project before the first
+push.
 
 ```sh
 cd /path/to/project
@@ -325,23 +484,27 @@ glabp repo create NAMESPACE/REPO \
   --defaultBranch main \
   --remoteName gitlab
 
-git remote -v
+repo_url="git@gitlab.com:NAMESPACE/REPO.git"
+git remote get-url gitlab >/dev/null 2>&1 || git remote add gitlab "$repo_url"
+
 git push gitlab main
 ```
 
 For a public repository, use `--public` instead of `--private`.
 
-If the remote was not added automatically, add it manually and push:
+If `glabp repo create` reports that the project already exists, inspect the
+remote before changing anything:
 
 ```sh
-git remote add gitlab git@gitlab.com:NAMESPACE/REPO.git
-git push gitlab main
+git remote -v
+glabp repo view NAMESPACE/REPO
 ```
 
-### Create a GitLab repo by pushing to it
+### Create a GitLab project by first push
 
-GitLab can create a new private project on first push if your account has
-permission to create projects in the target namespace.
+GitLab can create a private project when you push to a path that does not yet
+exist, as long as your account has permission to create projects in the target
+namespace.
 
 ```sh
 cd /path/to/project
@@ -350,8 +513,8 @@ git remote add gitlab git@gitlab.com:NAMESPACE/REPO.git
 git push gitlab main
 ```
 
-For a GitLab-only repository where you want `gitlab/main` to become the branch's
-upstream, use:
+If this is a GitLab-only repository and you want plain `git push` to target
+GitLab in the future, set the upstream:
 
 ```sh
 git push --set-upstream gitlab main
@@ -359,7 +522,7 @@ git push --set-upstream gitlab main
 
 ### Push the same existing directory to GitHub and GitLab
 
-Use this when a local repository should have both hosting remotes.
+Use this for dual-hosted repositories.
 
 ```sh
 cd /path/to/project
@@ -379,16 +542,13 @@ glabp repo create NAMESPACE/REPO \
   --defaultBranch main \
   --remoteName gitlab
 
+git remote get-url gitlab >/dev/null 2>&1 || \
+  git remote add gitlab git@gitlab.com:NAMESPACE/REPO.git
+
 git push gitlab main
 ```
 
-Check the remotes:
-
-```sh
-git remote -v
-```
-
-Expected shape:
+Expected remote shape:
 
 ```text
 github  git@github.com:OWNER/REPO.git (fetch)
@@ -398,9 +558,6 @@ gitlab  git@gitlab.com:NAMESPACE/REPO.git (push)
 ```
 
 ### Add GitLab to a repo that already has GitHub
-
-Use this when the repository already exists locally and already has a GitHub
-remote.
 
 ```sh
 cd /path/to/project
@@ -412,20 +569,13 @@ glabp repo create NAMESPACE/REPO \
   --defaultBranch main \
   --remoteName gitlab
 
-git push gitlab main
-```
+git remote get-url gitlab >/dev/null 2>&1 || \
+  git remote add gitlab git@gitlab.com:NAMESPACE/REPO.git
 
-If needed, add the remote manually:
-
-```sh
-git remote add gitlab git@gitlab.com:NAMESPACE/REPO.git
 git push gitlab main
 ```
 
 ### Add GitHub to a repo that already has GitLab
-
-Use this when the repository already exists locally and already has a GitLab
-remote.
 
 ```sh
 cd /path/to/project
@@ -441,41 +591,44 @@ ghp repo create OWNER/REPO \
 
 ### Rename `origin` to a forge-specific remote name
 
-Use this when a repository started with `origin`, but you now want clearer names
-for multi-forge hosting.
+Use this when a repository started with `origin`, but now has more than one
+hosting remote.
+
+If `origin` points to GitHub:
 
 ```sh
 git remote rename origin github
-```
-
-Then add the other forge remote:
-
-```sh
 git remote add gitlab git@gitlab.com:NAMESPACE/REPO.git
 ```
 
-Or, if `origin` currently points to GitLab:
+If `origin` points to GitLab:
 
 ```sh
 git remote rename origin gitlab
 git remote add github git@github.com:OWNER/REPO.git
 ```
 
+Check:
+
+```sh
+git remote -v
+```
+
 ### About `--set-upstream` / `-u`
 
-`git push --set-upstream <remote> <branch>` records a tracking relationship for
-the current branch. That is useful for a single primary remote.
+`git push --set-upstream <remote> <branch>` records the upstream branch for the
+current local branch. That is useful when one remote is primary.
 
-For a repository with both GitHub and GitLab remotes, do not set both as the
-upstream for the same branch. A local branch should have one upstream. Push to
-additional remotes explicitly:
+For a dual-hosted repository, do not try to make both GitHub and GitLab the
+upstream for the same local branch. A branch has one upstream. Push to secondary
+remotes explicitly:
 
 ```sh
 git push github main
 git push gitlab main
 ```
 
-Check the current upstream with:
+Check the current upstream:
 
 ```sh
 git branch -vv
@@ -501,37 +654,41 @@ Push to both:
 git push github main && git push gitlab main
 ```
 
-### Useful repo-check commands
+## Useful command reference
+
+### Local Git state
 
 ```sh
 git status
+git status --short
 git remote -v
 git branch -vv
 git log --oneline --decorate --max-count=5
 ```
 
-GitHub:
+### GitHub through `ghp`
 
 ```sh
+ghp auth status
 ghp repo view OWNER/REPO
 ghp repo list --limit 10
 ghp pr list
+ghp api user
 ```
 
-GitLab:
+### GitLab through `glabp`
 
 ```sh
+glabp auth status
 glabp repo view NAMESPACE/REPO
 glabp repo list --per-page 10
 glabp mr list
+glabp pipeline list
 ```
 
-## Security model
+## Files that should not be tracked
 
-These wrappers protect against accidental long-term storage of GitHub/GitLab CLI
-credentials in the default CLI config locations.
-
-Tracked in git:
+Tracked in the dotfiles repo:
 
 ```text
 wrapper scripts
@@ -539,7 +696,7 @@ README
 deployment layout
 ```
 
-Not tracked in git:
+Not tracked:
 
 ```text
 tokens
@@ -548,44 +705,47 @@ password-store contents
 ~/.config/gh
 ~/.config/glab-cli
 temporary runtime files
+repository-local secrets
 ```
 
-The wrappers assume:
-
-- the local user account is trusted
-- the local `pass` store is trusted
-- GPG private keys are protected appropriately
-- commands are not run with shell tracing enabled
-- untrusted `gh` or `glab` extensions are not invoked through these wrappers
+The dotfiles repository should contain the mechanism, not the credential state.
 
 ## Limitations
 
-`ghp` passes the GitHub token through the process environment as `GH_TOKEN`.
+### `ghp` uses an environment variable
 
-That is the normal mechanism supported by `gh`, but it means the token exists in
-the environment of the `gh` process while the command runs.
+`ghp` passes the GitHub token through `GH_TOKEN` in the environment of the child
+`gh` process.
 
-`glabp` restores the GitLab CLI config to a temporary directory for the duration
-of the command. The temporary directory is created with restrictive permissions
-and removed after the command exits.
+That is the standard mechanism supported by GitHub CLI, but it means the token
+exists in process environment memory while the command runs. This is acceptable
+for the intended local threat model, but it is not process-level isolation.
 
-`glabp` treats `config.yml` as an opaque file. If future versions of `glab`
-start storing important auth state in additional files under `GLAB_CONFIG_DIR`,
-the wrapper may need to be revised.
+### `glabp` persists only `config.yml`
 
-`glabp` persists only `config.yml`. If `glab` creates additional files in the
-runtime config directory, those files are discarded when the temporary directory
-is removed.
+`glabp` restores and persists only `config.yml`.
 
-The wrappers do not manage Git SSH keys. They only affect CLI authentication for
-`gh` and `glab`. Git pushes and pulls still depend on your Git remote URLs and
-SSH configuration.
+If a future `glab` version begins storing important auth state in additional
+files under `GLAB_CONFIG_DIR`, those files will be discarded when the temporary
+directory is removed. In that case, the wrapper should be revised.
+
+### `glabp` treats the config as opaque
+
+`glabp` does not parse or validate the GitLab CLI config format. That is
+intentional. The wrapper avoids becoming a partial, fragile implementation of
+GitLab CLI internals.
+
+### The wrappers do not manage Git transport
+
+`ghp` and `glabp` authenticate API-oriented CLI commands. They do not manage Git
+SSH keys, Git credential helpers, known_hosts entries, remote URLs, or branch
+upstreams.
 
 ## Troubleshooting
 
 ### `ghp: failed to read token from pass`
 
-Check that this exists:
+Check that this entry exists and is readable:
 
 ```sh
 pass show tokens/github/gh-oauth
@@ -595,7 +755,7 @@ pass show tokens/github/gh-oauth
 
 The pass entry exists, but the first line is empty.
 
-Edit the entry and make sure the token is on the first line:
+Edit it and make sure the token is on the first line:
 
 ```sh
 pass edit tokens/github/gh-oauth
@@ -603,7 +763,7 @@ pass edit tokens/github/gh-oauth
 
 ### `glabp: failed to read GitLab config from pass`
 
-Check that this exists:
+Check that this entry exists and contains a complete GitLab CLI config:
 
 ```sh
 pass show tokens/gitlab/glab-oauth-config
@@ -641,39 +801,109 @@ sudo pacman -S coreutils
 
 ### `glabp` works but keeps updating the pass entry
 
-`glabp` only writes back to `pass` when the plaintext `config.yml` changes.
+`glabp` writes back to `pass` only when the plaintext `config.yml` changes.
 
-If this happens frequently, `glab` is probably refreshing or rewriting some part
-of its config. That is expected occasionally for OAuth-backed authentication.
+If this happens often, `glab` is probably refreshing or rewriting part of its
+config. Occasional rewrites are expected for OAuth-backed authentication.
+Frequent rewrites are worth inspecting by testing with a throwaway temporary
+config directory.
 
-### Git push fails even though `ghp` or `glabp` auth works
+### Git push fails even though wrapper auth works
 
-The wrappers authenticate the CLI tools. They do not authenticate Git SSH
+The wrappers authenticate `gh` and `glab`. They do not authenticate Git SSH
 transport.
 
-Check SSH separately:
+Check SSH:
 
 ```sh
 ssh -T git@github.com
 ssh -T git@gitlab.com
 ```
 
-Then check the remote URLs:
+Check remotes:
 
 ```sh
 git remote -v
 ```
 
-## Test commands
+Check upstreams:
+
+```sh
+git branch -vv
+```
+
+### `remote origin already exists`
+
+Use an explicit remote name or rename the existing remote.
+
+For a GitHub remote:
+
+```sh
+git remote rename origin github
+```
+
+For a GitLab remote:
+
+```sh
+git remote rename origin gitlab
+```
+
+Then add the other remote explicitly.
+
+## Maintenance checklist
+
+After editing the wrappers:
+
+```sh
+zsh -n ~/.local/bin/ghp
+zsh -n ~/.local/bin/glabp
+```
+
+Run read-only smoke tests:
 
 ```sh
 ghp auth status
-glabp auth status
-```
-
-Then try normal read-only commands:
-
-```sh
 ghp repo list --limit 5
+
+glabp auth status
 glabp repo list --per-page 5
 ```
+
+Check that normal CLI config locations were not repopulated unexpectedly:
+
+```sh
+find ~/.config/gh ~/.config/glab-cli -maxdepth 2 -type f 2>/dev/null
+```
+
+Check that no wrapper secrets are tracked:
+
+```sh
+git status --short
+git ls-files | grep -Ei 'token|secret|oauth|config\.yml|\.env|\.pem|\.key' || true
+```
+
+## Hardening backlog
+
+These are optional improvements, not requirements for the current design.
+
+- add a small `forge-cli-auth doctor` script for dependency and config checks
+- add shell tests for missing dependencies, empty pass entries, and temp cleanup
+- add a `README.security.md` if the package grows beyond two wrappers
+- support non-`gitlab.com` hosts with documented examples
+- document minimum token scopes for the intended `gh` and `glab` workflows
+- consider rejecting execution when shell tracing is enabled in the parent shell,
+  if that becomes operationally useful
+- periodically verify whether `glab` still stores all required auth state in
+  `config.yml`
+
+## Summary
+
+`forge-cli-auth` is intentionally small.
+
+It does one thing: it makes `gh` and `glab` convenient to use while keeping their
+durable authentication state in `pass` instead of the default CLI config
+locations.
+
+It is not a substitute for endpoint security, repository hygiene, SSH key
+management, token scoping, or secret scanning. It is a clean, auditable boundary
+around one specific credential-handling decision.
