@@ -58,6 +58,7 @@ setup_case() {
   FAKE_GLAB_MUTATION_FILE="$CASE_DIR/glab-mutation"
   FAKE_GLAB_READY_LOG="$CASE_DIR/glab-ready"
   FAKE_GLAB_SIGNAL_LOG="$CASE_DIR/glab-signal"
+  FAKE_GLAB_STDIN_LOG="$CASE_DIR/glab-stdin"
 
   FAKE_MKTEMP_ARGS_LOG="$CASE_DIR/mktemp-args"
   FAKE_MKTEMP_PATH_LOG="$CASE_DIR/mktemp-path"
@@ -96,6 +97,7 @@ EOF
   FAKE_GLAB_STATUS=0
   FAKE_GLAB_SIGNAL_ACTION='unchanged'
   FAKE_GLAB_SIGNAL_CHILD_STATUS=
+  FAKE_GLAB_CAPTURE_STDIN=0
 
   FAKE_MKTEMP_MODE='ok'
   FAKE_MKTEMP_STATUS=1
@@ -134,6 +136,7 @@ EOF
     FAKE_GLAB_MUTATION_FILE \
     FAKE_GLAB_READY_LOG \
     FAKE_GLAB_SIGNAL_LOG \
+    FAKE_GLAB_STDIN_LOG \
     FAKE_MKTEMP_ARGS_LOG \
     FAKE_MKTEMP_PATH_LOG \
     FAKE_SHA256SUM_COUNT_FILE \
@@ -149,6 +152,7 @@ EOF
     FAKE_GLAB_STATUS \
     FAKE_GLAB_SIGNAL_ACTION \
     FAKE_GLAB_SIGNAL_CHILD_STATUS \
+    FAKE_GLAB_CAPTURE_STDIN \
     FAKE_MKTEMP_MODE \
     FAKE_MKTEMP_STATUS \
     FAKE_SHA256SUM_FAIL_ON_CALL \
@@ -434,6 +438,39 @@ test_parent_arguments_are_preserved() {
     "$expected_arguments" \
     "$FAKE_GLAB_ARGS_LOG" \
     'parent argument boundaries should be preserved'
+}
+
+test_parent_standard_input_is_preserved() {
+  setup_case
+
+  stdin_file="$CASE_DIR/stdin-payload"
+
+  cat >"$stdin_file" <<'EOF'
+{
+  "description": "synthetic request body",
+  "topics": ["cli", "pass"]
+}
+EOF
+
+  FAKE_GLAB_CAPTURE_STDIN=1
+  export FAKE_GLAB_CAPTURE_STDIN
+
+  run_wrapper \
+    api \
+    projects/84496622 \
+    --method \
+    PUT \
+    --input \
+    - <"$stdin_file"
+
+  assert_equals '0' "$RUN_STATUS" || return 1
+
+  assert_files_equal \
+    "$stdin_file" \
+    "$FAKE_GLAB_STDIN_LOG" \
+    'parent standard input should reach glab unchanged' || return 1
+
+  assert_runtime_removed
 }
 
 test_unchanged_state_is_not_written_back() {
@@ -914,6 +951,10 @@ run_test \
 run_test \
   'preserves parent argument order and boundaries' \
   test_parent_arguments_are_preserved
+
+run_test \
+  'preserves parent standard input' \
+  test_parent_standard_input_is_preserved
 
 run_test \
   'does not write back unchanged state' \

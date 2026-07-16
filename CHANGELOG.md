@@ -6,6 +6,13 @@ The project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-16
+
+### Fixed
+
+- Preserve standard input passed through `glab-pass`, including piped request
+  bodies used by commands such as `glab api --input -`.
+
 ## [0.1.0] - 2026-07-16
 
 ### Added
@@ -33,5 +40,6 @@ The project uses [Semantic Versioning](https://semver.org/).
 - Security reporting and threat-boundary documentation.
 - Apache License 2.0 licensing with SPDX identifiers.
 
-[Unreleased]: https://github.com/JeffreyCordova/forge-cli-pass/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/JeffreyCordova/forge-cli-pass/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/JeffreyCordova/forge-cli-pass/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/JeffreyCordova/forge-cli-pass/releases/tag/v0.1.0

@@ -14,6 +14,7 @@ set -u
 : "${FAKE_GLAB_MUTATION_FILE:?}"
 : "${FAKE_GLAB_READY_LOG:?}"
 : "${FAKE_GLAB_SIGNAL_LOG:?}"
+: "${FAKE_GLAB_STDIN_LOG:?}"
 
 : >"$FAKE_GLAB_CALLED_LOG"
 
@@ -46,6 +47,21 @@ for argument do
 
     argument_number=$((argument_number + 1))
 done
+
+case ${FAKE_GLAB_CAPTURE_STDIN:-0} in
+    0)
+        ;;
+
+    1)
+        cat >"$FAKE_GLAB_STDIN_LOG" || exit 68
+        ;;
+
+    *)
+        printf 'fake glab: invalid stdin capture mode: %s\n' \
+            "$FAKE_GLAB_CAPTURE_STDIN" >&2
+        exit 64
+        ;;
+esac
 
 apply_state_action() {
     state_action=$1

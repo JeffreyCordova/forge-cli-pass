@@ -320,8 +320,18 @@ command chmod 600 "$config_file" ||
 initial_hash=$(hash_file "$config_file") ||
     startup_failure 'failed to fingerprint initial GitLab state'
 
-GLAB_CONFIG_DIR=$runtime_dir command glab "$@" &
+# POSIX shells may attach /dev/null to an asynchronous command's standard
+# input when job control is disabled. Preserve the caller's standard input on
+# a private descriptor, restore it explicitly for glab, and avoid leaking the
+# extra descriptor into the parent CLI.
+if ! exec 9<&0; then
+    startup_failure 'failed to preserve standard input'
+fi
+
+GLAB_CONFIG_DIR=$runtime_dir command glab "$@" <&9 9<&- &
 child_pid=$!
+
+exec 9<&-
 
 # A signal may have arrived in the narrow interval immediately before the child
 # PID became available.
