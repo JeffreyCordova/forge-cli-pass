@@ -8,7 +8,9 @@ script_dir=$(
 ) || exit 1
 
 BUSYBOX=${BUSYBOX:-busybox}
-export BUSYBOX
+MAKE=${MAKE:-make}
+
+export BUSYBOX MAKE
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -67,12 +69,17 @@ EOF
 require_command dash
 require_command bash
 require_executable "$BUSYBOX"
+require_executable "$MAKE"
 require_command cmp
 require_command mktemp
 require_command sha256sum
 require_command stat
 require_command chmod
 require_command rm
+require_command install
+require_command ln
+require_command readlink
+require_command pwd
 
 "$BUSYBOX" ash -c ':' >/dev/null 2>&1 || {
   printf 'tests: BusyBox ash is unavailable\n' >&2
@@ -123,12 +130,17 @@ run_matrix_entry \
   'busybox-ash' \
   "$BUSYBOX" ash
 
+printf '\n== Installation ==\n'
+
+sh "$script_dir/test-install.sh" ||
+  overall_status=1
+
 printf '\n'
 
 if [ "$overall_status" -eq 0 ]; then
-  printf 'All shell-matrix tests passed.\n'
+  printf 'All shell-matrix and installation tests passed.\n'
 else
-  printf 'One or more shell-matrix tests failed.\n' >&2
+  printf 'One or more tests failed.\n' >&2
 fi
 
 exit "$overall_status"

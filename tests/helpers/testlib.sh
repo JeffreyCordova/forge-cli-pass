@@ -156,6 +156,17 @@ assert_files_equal() {
   fi
 }
 
+assert_nonzero() {
+  actual=$1
+  description=${2:-expected a nonzero status}
+
+  if [ "$actual" -eq 0 ]; then
+    printf '    assertion failed: %s\n' "$description" >&2
+    printf '      actual: <%s>\n' "$actual" >&2
+    return 1
+  fi
+}
+
 run_test() {
   test_name=$1
   test_function=$2
