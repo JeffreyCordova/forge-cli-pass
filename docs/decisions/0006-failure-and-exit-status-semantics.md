@@ -4,85 +4,117 @@
 
 ## Context
 
-A wrapper invocation may produce multiple outcomes:
+`forge-cli-pass` wraps existing command-line tools rather than reimplementing
+their operations.
+
+For command-compatible behavior, the wrappers should preserve the parent CLI's
+exit status when the wrapper successfully completes its own credential-lifecycle
+responsibilities.
+
+A wrapper invocation can, however, produce more than one outcome:
 
 - the parent CLI succeeds
-- the parent CLI returns a nonzero status
-- staged credential state becomes invalid
-- required writeback fails
-- cleanup fails
-- more than one wrapper obligation fails
-- a termination signal is received
+- the parent CLI exits nonzero
+- required runtime credential state becomes invalid
+- changed credential state cannot be written back
+- temporary plaintext state cannot be removed
+- multiple wrapper operations fail
+- the process is terminated by a signal
+- a required dependency cannot be executed
 
-The project must preserve parent CLI behavior where possible while also making
-credential-lifecycle failures visible.
+Returning the parent status unconditionally would conceal failures in the
+wrapper's credential-handling contract.
 
-Returning the parent status unconditionally would conceal wrapper failures.
+Replacing every parent failure with a wrapper-specific status would weaken
+command compatibility and make the wrappers less useful in scripts and
+automation.
 
-Replacing every parent failure with a wrapper status would undermine command
-compatibility.
+The project therefore needs a deterministic distinction between:
 
-A deterministic result model is therefore required.
+1. **parent CLI outcomes**
+2. **wrapper lifecycle failures**
+3. **signal-driven termination**
+4. **shell-level execution failures**
 
 ## Decision
 
-### Parent status preservation
+### Result classes
 
-The wrapper will preserve the parent CLI's exact exit status only when all
-wrapper-managed postconditions complete successfully.
+Wrapper outcomes are divided into four classes:
 
-For `glab-pass`, those postconditions include:
+| Result class | Final status |
+|---|---:|
+| Parent and wrapper succeed | `0` |
+| Parent fails but wrapper obligations succeed | Exact parent status |
+| Wrapper lifecycle fails during ordinary execution | `1` |
+| Handled signal terminates the invocation | Conventional signal-derived status |
 
-- staged state remains valid when required
-- changed state is written back successfully
-- cleanup succeeds
-
-For `gh-pass`, direct process replacement may allow the parent status to be
-returned naturally because no wrapper post-processing is required.
+Normal shell execution statuses such as `126` and `127` may still occur when
+execution fails at the shell level.
 
 ### Successful invocation
 
-Return status `0` only when:
+A wrapper returns status `0` only when:
 
 - the parent CLI returns `0`
 - every required wrapper operation succeeds
+- all required postconditions are satisfied
+
+For `glab-pass`, required wrapper operations may include:
+
+- validating staged state
+- detecting configuration changes
+- performing required writeback
+- removing temporary plaintext state
+
+For `gh-pass`, no post-command credential handling is normally required because
+the wrapper may replace itself directly with `gh`.
 
 ### Clean parent failure
 
-Return the exact nonzero parent status when:
+A wrapper preserves the exact nonzero status returned by the parent CLI when:
 
-- the parent CLI returns nonzero
-- every wrapper-managed credential validation, writeback, and cleanup operation
-  succeeds
+- the parent CLI completes normally
+- all required wrapper postconditions succeed
+- no wrapper lifecycle failure occurs
 
 Example:
 
 ```text
 glab exits 4
-writeback succeeds
+staged config remains valid
+required writeback succeeds
 cleanup succeeds
 glab-pass exits 4
 ```
 
+This preserves command compatibility when the credential lifecycle completed
+correctly.
+
 ### Wrapper lifecycle failure
 
-Return status `1` when any wrapper-managed lifecycle obligation fails during
-ordinary completion.
+A wrapper returns status `1` when any required wrapper-managed lifecycle
+operation fails during ordinary execution.
 
-Wrapper failures include:
+Examples include:
 
-- invalid or unexpectedly missing runtime credential state
-- required credential-state writeback failure
-- cleanup failure
-- another postcondition required by the accepted architecture
+- a required dependency is missing
+- a credential entry cannot be read
+- retrieved credential material is empty
+- a temporary runtime directory cannot be created
+- required permissions cannot be established
+- staged runtime state becomes missing or empty unexpectedly
+- required changed state cannot be written back
+- cleanup fails
+- a documented wrapper postcondition cannot be satisfied
 
-A wrapper failure overrides the parent status.
+A wrapper lifecycle failure overrides the parent CLI status.
 
 Example:
 
 ```text
 glab exits 0
-writeback fails
+changed config cannot be written back
 cleanup succeeds
 glab-pass exits 1
 ```
@@ -96,50 +128,190 @@ cleanup fails
 glab-pass exits 1
 ```
 
-When a parent failure is overridden, diagnostics must still report the parent
-status.
+When a parent status is overridden, the wrapper must report the parent status in
+its diagnostics.
 
-### Multiple wrapper failures
+### No custom wrapper exit-code taxonomy
 
-The wrapper will not assign a priority ordering among writeback, cleanup, and
-other lifecycle failures.
-
-It will:
-
-1. record the parent status
-2. attempt every remaining safe wrapper operation
-3. report each wrapper failure
-4. return status `1` if any wrapper lifecycle operation failed
-
-A writeback failure must not prevent cleanup from being attempted.
-
-### Wrapper failure code
-
-The general wrapper operational failure code is:
+The general wrapper operational failure status is:
 
 ```text
 1
 ```
 
-The project will not define a larger custom exit-code taxonomy unless a
-concrete automation requirement justifies it.
+The project will not initially assign separate public exit codes for:
 
-Diagnostics, rather than unique status values, distinguish the specific
-wrapper failure.
+- dependency failure
+- credential retrieval failure
+- invalid runtime state
+- writeback failure
+- cleanup failure
+- permission failure
 
-### Shell execution failures
+A larger exit-code taxonomy would:
 
-Normal shell execution statuses such as `126` and `127` may still occur when
-the shell cannot execute a command.
+- create additional public interface commitments
+- risk collisions with parent CLI statuses
+- require long-term compatibility guarantees
+- provide limited value without a demonstrated automation requirement
 
-Expected non-baseline dependencies should be validated before credential
-handling so missing dependencies normally produce an explicit wrapper
-diagnostic and status `1`.
+Diagnostics identify the specific wrapper failure.
 
-### Signal-driven termination
+A future decision may introduce structured failure codes if concrete operator
+or automation requirements justify them.
 
-For handled signals, the wrapper will preserve the conventional
-signal-derived status:
+## Parent CLI status preservation
+
+### `gh-pass`
+
+`gh-pass` has no normal post-command credential state to validate, persist, or
+remove.
+
+After successful dependency and credential validation, it may replace itself
+with the parent CLI:
+
+```sh
+GH_TOKEN=$token exec gh "$@"
+```
+
+When process replacement succeeds, the resulting status is naturally the
+status of `gh`.
+
+If process replacement itself fails, normal shell execution behavior applies.
+
+### `glab-pass`
+
+`glab-pass` cannot replace itself with `glab` because it must perform
+post-command work.
+
+It must:
+
+1. run `glab`
+2. record the exact parent status immediately
+3. validate staged state
+4. perform required writeback
+5. attempt cleanup
+6. determine the final result according to this ADR
+
+The parent status must not be overwritten accidentally by later shell commands.
+
+## Multiple wrapper failures
+
+More than one wrapper operation may fail during a single invocation.
+
+For example:
+
+```text
+glab exits 4
+changed config writeback fails
+runtime directory removal fails
+```
+
+The wrapper will not assign a semantic priority between writeback, cleanup, and
+other lifecycle failures.
+
+Instead, it must:
+
+1. record the parent status
+2. attempt every remaining safe wrapper operation
+3. record each wrapper failure
+4. report each relevant failure
+5. return status `1`
+
+A failure in one post-command operation must not prevent another safe operation
+from being attempted.
+
+In particular:
+
+- writeback failure must not prevent cleanup
+- invalid runtime state must not prevent cleanup
+- a parent failure must not prevent required writeback
+- a parent failure must not prevent cleanup
+
+## Failure-reporting requirements
+
+Wrapper diagnostics must:
+
+- identify which wrapper produced the message
+- state the failed wrapper operation
+- avoid printing credential values
+- identify non-sensitive paths or pass-entry names when useful
+- distinguish parent failure from wrapper failure
+- report an overridden parent status
+- report every material wrapper failure encountered
+- write diagnostic messages to standard error
+
+Example:
+
+```text
+glab-pass: glab exited with status 4
+glab-pass: failed to persist changed GitLab authentication state
+glab-pass: failed to remove runtime directory: /tmp/glab-pass.ABC123
+```
+
+Diagnostics must not include:
+
+- access tokens
+- refresh tokens
+- complete credential payloads
+- decrypted pass-entry content
+- command strings reconstructed through unsafe interpolation
+
+Normal parent CLI output remains controlled by the parent CLI.
+
+## Startup and pre-execution failures
+
+A failure before parent execution is a wrapper lifecycle failure and returns
+status `1`.
+
+Examples include:
+
+- missing `pass`
+- missing parent CLI
+- missing `mktemp`
+- missing `sha256sum`
+- unreadable pass entry
+- empty credential material
+- inability to establish runtime state
+- inability to apply required permissions
+
+When startup validation fails:
+
+- the parent CLI must not be invoked
+- no fallback credential source may be used
+- any runtime state already created must be cleaned up
+- cleanup failure must also be reported
+
+## Shell execution failures
+
+Normal shell conventions may produce:
+
+```text
+126  command found but not executable
+127  command not found
+```
+
+Expected non-baseline dependencies must be validated before credential handling
+where practical, so missing dependencies should normally produce:
+
+```text
+1
+```
+
+with an explicit wrapper diagnostic.
+
+Statuses `126` and `127` remain possible for unexpected execution failures,
+races, or failures occurring after validation.
+
+The wrappers must not redefine these shell-level statuses as project-specific
+meanings.
+
+## Signal-driven termination
+
+Handled signal termination remains distinct from ordinary parent or wrapper
+failure.
+
+The accepted signal-derived statuses are:
 
 ```text
 HUP   129
@@ -147,108 +319,280 @@ INT   130
 TERM  143
 ```
 
-Cleanup must still be attempted.
+When a handled signal terminates the invocation, the wrapper must:
 
-If cleanup fails during signal-driven termination:
+1. record that signal-driven termination occurred
+2. ensure the parent process is not left running unintentionally
+3. attempt required cleanup
+4. report cleanup failure
+5. preserve the conventional signal-derived status
 
-- the cleanup failure must be reported prominently
-- the signal-derived status remains the final status
+If cleanup fails after a handled signal, the signal-derived status remains the
+final status.
 
-The signal remains the causal termination event.
+Example:
 
-Whether changed GitLab configuration is written back after signal-driven
-termination remains a separate open decision.
+```text
+TERM received
+cleanup fails
+glab-pass reports cleanup failure
+glab-pass exits 143
+```
+
+The signal remains the causal termination condition.
+
+Whether changed GitLab state should be written back after signal-driven
+termination is outside this ADR and requires a separate decision.
+
+## Cleanup semantics
+
+Cleanup is part of the wrapper's credential-lifecycle contract.
+
+During ordinary completion:
+
+- cleanup success is required for the wrapper to preserve the parent status
+- cleanup failure produces wrapper status `1`
+- cleanup failure must be reported
+- cleanup must still be attempted after another wrapper failure
+
+During handled signal termination:
+
+- cleanup must be attempted
+- cleanup failure must be reported
+- the signal-derived status remains final
+
+Removal of temporary state reduces ordinary persistent credential residue. It
+does not guarantee forensic erasure.
+
+## Writeback semantics
+
+For ordinary `glab-pass` completion, required writeback is a wrapper
+postcondition.
+
+If changed state must be persisted and writeback fails:
+
+- the failure must be reported
+- cleanup must still be attempted
+- the final status is `1`
+- any nonzero parent status must also be reported
+
+Writeback after ordinary nonzero parent completion is governed by ADR 0005.
+
+Writeback after signal-driven termination remains unresolved.
 
 ## Alternatives considered
 
 ### Always return the parent status
 
-Rejected because wrapper failures could leave credential state unpersisted or
-plaintext runtime material behind while appearing indistinguishable from a
-normal parent result.
+Rejected because it could conceal:
 
-### Always prioritize wrapper status
+- failed credential writeback
+- failed cleanup
+- invalid staged state
+- other violations of the wrapper lifecycle
 
-Accepted for ordinary wrapper lifecycle failures, but not for handled signals.
+A caller could incorrectly interpret the invocation as an ordinary parent CLI
+failure even though the wrapper did not preserve its credential guarantees.
 
-Signal-derived statuses remain useful to calling processes and communicate the
-causal termination condition.
+### Always return wrapper status after any parent failure
 
-### Define separate status codes for writeback and cleanup failures
+Rejected because it would discard useful parent CLI status information even
+when the wrapper completed correctly.
 
-Rejected initially because:
+That would weaken command compatibility.
 
-- there is no universally recognized project-specific code range
-- codes could overlap with parent CLI statuses
-- the public status API would need long-term stability
-- diagnostics are required regardless
-- current automation needs do not justify the additional interface
+### Preserve the parent status when both parent and wrapper fail
 
-### Rank wrapper failures
+Rejected because a caller could mistake a wrapper lifecycle failure for a normal
+parent CLI outcome.
 
-Rejected because writeback and cleanup failures violate different parts of the
-credential lifecycle and both must be reported.
+The parent status is still reported diagnostically.
 
-The wrapper should attempt all remaining safe operations rather than stop after
-the nominally highest-priority failure.
+### Define a unique status for every wrapper failure
 
-### Preserve parent status when both parent and wrapper fail
+Rejected for the initial release because it would create an unnecessarily broad
+public interface without a demonstrated consumer requirement.
 
-Rejected because callers could interpret the result as an ordinary parent CLI
-failure even though the wrapper did not fulfill its credential-lifecycle
-contract.
+### Assign precedence among wrapper failures
+
+Rejected because writeback, cleanup, invalid runtime state, and permission
+failures affect different lifecycle obligations.
+
+All material failures should be reported. Any one of them is sufficient to make
+the wrapper invocation unsuccessful.
+
+### Let cleanup failure remain best effort
+
+Rejected because inability to remove staged plaintext credential material is
+directly relevant to the project's security objective.
+
+### Override signal status when cleanup fails
+
+Rejected because the signal is the causal termination event and its conventional
+status is useful to callers and operators.
+
+Cleanup failure remains visible through diagnostics.
 
 ## Consequences
 
 ### Positive
 
-- Parent command compatibility is preserved when the wrapper works correctly.
-- Credential-lifecycle failures cannot be silently hidden behind parent status.
-- Cleanup is attempted even after another wrapper failure.
-- The status model remains small and documentable.
-- Signal-derived statuses remain recognizable to callers.
+- Parent CLI statuses are preserved when the wrapper behaves correctly.
+- Wrapper lifecycle failures cannot be hidden behind parent statuses.
+- Cleanup remains mandatory and observable.
+- Required writeback failures are visible.
+- Multiple failures can be reported without inventing an artificial ranking.
+- The status model remains small and understandable.
+- Signal-derived statuses retain their conventional meaning.
+- Automation can distinguish clean parent behavior from wrapper failure in most
+  cases.
 
 ### Negative
 
+- Wrapper status `1` can also be returned by a parent CLI.
+- Diagnostics are required to distinguish those cases.
 - A wrapper failure can replace a meaningful parent status.
-- Status `1` can also be returned by the parent CLI, so diagnostics remain
-  necessary to distinguish the source.
-- Callers needing both statuses must parse diagnostics unless a future
-  structured interface is introduced.
-- Signal-time writeback semantics remain unresolved.
+- Callers cannot recover both statuses through exit codes alone.
+- Multiple diagnostics may be emitted for one invocation.
+- Signal-time writeback behavior remains unresolved.
 
 ## Security implications
 
-This model treats failure to maintain the documented credential lifecycle as a
-failure of the wrapper invocation.
+This decision treats failure to maintain the documented credential lifecycle as
+a failure of the wrapper invocation.
 
-In particular:
+It ensures that:
 
 - failed writeback cannot appear as successful credential persistence
-- failed cleanup cannot appear as a clean invocation
+- failed cleanup cannot appear as ordinary successful completion
+- invalid staged state cannot be silently ignored
 - parent failure does not excuse wrapper postcondition failures
 - cleanup remains required after writeback or validation failure
-- diagnostics must not expose credential material while reporting failures
+- multiple wrapper failures remain visible
+- diagnostics preserve failure context without exposing credentials
 
-Preserving signal statuses avoids concealing interruption, but cleanup failure
-must remain visible because staged plaintext material may remain.
+The decision does not provide:
+
+- structured machine-readable error output
+- unique public status values for every failure
+- recovery of both parent and wrapper statuses from the final status alone
+- guarantees about unhandled or uncatchable signals
 
 ## Verification requirements
 
-Tests must cover:
+Tests must cover all of the following.
 
-- parent success with successful postconditions
-- parent nonzero status with successful postconditions
+### Successful outcomes
+
+- parent success with all wrapper postconditions satisfied
+- final status `0`
+
+### Clean parent failures
+
+- multiple representative parent nonzero statuses
+- exact parent status preservation
+- successful validation, writeback, and cleanup
+
+### Startup failures
+
+- missing non-baseline dependency
+- unreadable credential entry
+- empty credential material
+- runtime-directory creation failure
+- permission-establishment failure
+- confirmation that the parent CLI is not invoked
+- cleanup of any partially created runtime state
+
+### Writeback failures
+
 - writeback failure after parent success
 - writeback failure after parent failure
+- final status `1`
+- parent status reported when nonzero
+- cleanup still attempted
+- no credential material in diagnostics
+
+### Cleanup failures
+
 - cleanup failure after parent success
 - cleanup failure after parent failure
+- cleanup failure after successful writeback
+- cleanup failure after failed writeback
+- final status `1` during ordinary execution
+- relevant parent status reported
+
+### Invalid runtime state
+
+- missing staged config after parent success
+- empty staged config after parent success
+- missing staged config after parent failure
+- empty staged config after parent failure
+- invalid state not written back
+- cleanup still attempted
+- final status `1`
+
+### Multiple failures
+
 - simultaneous writeback and cleanup failure
-- invalid staged state after parent success
-- invalid staged state after parent failure
-- preservation of exact clean parent statuses
-- wrapper status `1` after ordinary lifecycle failure
-- signal-derived statuses
-- cleanup attempts after handled signals
-- cleanup diagnostics after signal-time cleanup failure
-- absence of credential values from diagnostics
+- simultaneous invalid state and cleanup failure
+- parent failure combined with multiple wrapper failures
+- every material failure reported
+- final status `1`
+
+### Signals
+
+- handled `HUP` produces `129`
+- handled `INT` produces `130`
+- handled `TERM` produces `143`
+- cleanup is attempted after each handled signal
+- cleanup failure is reported
+- signal-derived status is retained after cleanup failure
+- the parent process is not unintentionally left running
+- no credential material appears in diagnostics
+
+### `gh-pass`
+
+- successful process replacement
+- exact parent exit-status behavior
+- argument preservation
+- missing dependency behavior
+- credential retrieval failure
+- unexpected execution failure behavior where practical
+
+### Isolation
+
+All tests must use:
+
+- fake parent CLI executables
+- a fake `pass`
+- fake credential values
+- isolated temporary directories
+- no network
+- no real password store
+- no production forge credentials
+
+## Follow-on decisions
+
+This ADR does not resolve:
+
+- writeback behavior after signal-driven termination
+- credential-management command compatibility
+- structured diagnostics
+- future project-specific exit-code taxonomy
+- installation or packaging failure semantics
+
+Those concerns require separate decisions if introduced.
+
+## Decision summary
+
+`forge-cli-pass` preserves a parent CLI's exact exit status only when all
+wrapper-managed credential-lifecycle obligations complete successfully.
+
+Ordinary wrapper lifecycle failures return status `1` and override the parent
+status while preserving it in diagnostics.
+
+All remaining safe wrapper operations must still be attempted, and every
+material wrapper failure must be reported.
+
+Handled `HUP`, `INT`, and `TERM` preserve their conventional signal-derived
+statuses even when cleanup fails.
