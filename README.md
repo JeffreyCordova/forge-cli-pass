@@ -571,6 +571,11 @@ precedence through `PATH`.
 The CI workflow does not use real forge credentials, password-store contents,
 or persistent authentication state.
 
+GitHub protects `main` with a required, up-to-date `CI/Verify` check. External
+Actions are pinned to full commit identifiers, Dependabot monitors those pins,
+and OpenSSF Scorecard performs a supplemental post-merge and weekly repository
+assessment.
+
 The GitLab repository is a source and tag mirror and does not currently run a
 duplicate pipeline.
 
@@ -590,6 +595,8 @@ duplicate pipeline.
 
 ### Project operation
 
+- [Maintenance guide](docs/maintenance.md)
+- [Stdin-preservation case study](docs/case-studies/001-stdin-preservation.md)
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 - [Version](VERSION)

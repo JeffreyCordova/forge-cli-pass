@@ -4,9 +4,8 @@
 
 ## Supported versions
 
-Before the first tagged release, security fixes are made against the current `main` branch.
-
-After tagged releases begin, the intended support policy is:
+Security fixes are developed against the current `main` branch and released as
+a new tagged version when published behavior is affected.
 
 | Version | Support |
 |---|---|
@@ -15,15 +14,21 @@ After tagged releases begin, the intended support policy is:
 | Older tagged releases | Best effort |
 | Modified downstream copies | Not directly supported |
 
-A report affecting an older version should identify the affected revision or release.
+A report affecting an older version should identify the affected revision or
+release.
 
 ## Reporting a vulnerability
 
-Use GitHub private vulnerability reporting for the primary repository when that feature is available.
+Use [GitHub private vulnerability reporting](https://github.com/JeffreyCordova/forge-cli-pass/security/advisories/new)
+for the primary repository.
 
-Do not place sensitive details, proof-of-concept credential material, access tokens, private configuration, or exploitable reproduction steps in a public issue.
+Do not place sensitive details, proof-of-concept credential material, access
+tokens, private configuration, or exploitable reproduction steps in a public
+issue.
 
-When no private reporting mechanism is visible, open a minimal public issue requesting a private communication channel. Include no vulnerability details beyond the fact that the report concerns a potential security issue.
+If the private reporting mechanism is unavailable, open a minimal public issue
+requesting a private communication channel. Include no vulnerability details
+beyond the fact that the report concerns a potential security issue.
 
 Primary repository:
 
@@ -51,7 +56,7 @@ Replace all real tokens, hostnames, account names, configuration values, reposit
 
 ## Response process
 
-The intended response process is:
+The response process is:
 
 1. Confirm receipt of the report.
 2. Reproduce and assess the issue.
@@ -151,3 +156,9 @@ After a correction is available, public documentation may include:
 - Credit for the reporter, when requested
 
 Public disclosure should not include active credential material or unnecessary exploit details.
+
+## Related security documentation
+
+- [Threat model](docs/threat-model.md)
+- [Security assurance case](docs/security-assurance.md)
+- [Maintenance guide](docs/maintenance.md)

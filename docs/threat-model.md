@@ -409,10 +409,11 @@ reporting.
 **Scenario:** A release is created from an unintended commit, implicit tag,
 unverified tree, or tag that differs between upstreams.
 
-**Controls:** Semantic Versioning; annotated tags; clean `main`; matching
-`VERSION` and changelog; complete local and CI verification; commit and tag on
-both upstreams; canonical GitHub release verifies the remote tag; published
-releases are not replaced in place.
+**Controls:** Semantic Versioning; annotated tags; protected `main`; required
+up-to-date CI; matching `VERSION` and changelog; complete local verification;
+commit and tag on both upstreams; protection of `v*` tags against update and
+deletion; canonical GitHub release verifies the remote tag; published releases
+are not replaced in place.
 
 **Evidence:** ADR 0013, annotated release tags, CI records, GitHub releases, and
 mirrored GitLab tags.
@@ -466,7 +467,8 @@ to the parent CLIs, or a generated-artifact supply-chain process.
 | GitLab behavior | Private staging, validation, writeback, cleanup, signals, stdin |
 | Installation | Copy and staged install, custom paths, narrow uninstall, guarded links |
 | Continuous integration | GitHub Actions runs the accepted verification interface |
-| Release process | Annotated tags, matching upstream commits, verified CI commit, canonical release |
+| Repository controls | Protected `main`, required `CI/Verify`, full-SHA Action pins, Dependabot, Scorecard |
+| Release process | Protected annotated tags, matching upstream commits, verified CI commit, canonical release |
 
 Tests are evidence that controls are implemented. They are not proof that the
 trusted operating system, dependencies, or remote services are secure.
@@ -489,6 +491,8 @@ Review this threat model when:
   publication are added
 - a security report, compatibility bug, or dependency vulnerability invalidates
   an assumption
+- repository rules, CI permissions, dependency-update policy, or release-tag
+  protections change
 - an accepted ADR changes a security boundary or compatibility contract
 
 ## Related documents

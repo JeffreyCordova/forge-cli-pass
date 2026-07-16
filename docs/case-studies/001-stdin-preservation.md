@@ -491,9 +491,9 @@ administration.
 - [`../security-assurance.md`](../security-assurance.md)
   - SA-06: parent arguments and standard input are preserved
   - SA-11: verification is repeatable across supported shells
-- [`../decisions/0004-language-platform-shell-and-utility-baseline.md`](../decisions/0004-language-platform-shell-and-utility-baseline.md)
-- [`../decisions/0006-exit-status-and-failure-precedence.md`](../decisions/0006-exit-status-and-failure-precedence.md)
-- [`../decisions/0007-signal-time-writeback-and-cleanup.md`](../decisions/0007-signal-time-writeback-and-cleanup.md)
-- [`../decisions/0012-github-actions-verification.md`](../decisions/0012-github-actions-verification.md)
+- [`../decisions/0004-runtime-language-and-platform-support.md`](../decisions/0004-runtime-language-and-platform-support.md)
+- [`../decisions/0006-failure-and-exit-status-semantics.md`](../decisions/0006-failure-and-exit-status-semantics.md)
+- [`../decisions/0007-signal-driven-gitlab-writeback.md`](../decisions/0007-signal-driven-gitlab-writeback.md)
+- [`../decisions/0012-verify-in-github-actions.md`](../decisions/0012-verify-in-github-actions.md)
 - [`../decisions/0013-versioning-and-release-publication.md`](../decisions/0013-versioning-and-release-publication.md)
 - [`../../CHANGELOG.md`](../../CHANGELOG.md)
