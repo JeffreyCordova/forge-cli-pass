@@ -1,0 +1,358 @@
+#!/bin/sh
+
+# glab-pass
+#
+# Retrieve GitLab CLI authentication state from pass, stage it privately for
+# one glab invocation, persist eligible changes, and remove runtime state.
+
+set +x
+umask 077
+
+program_name=${0##*/}
+
+default_pass_entry='forge-cli-pass/gitlab/oauth-config'
+override_name='FORGE_CLI_PASS_GITLAB_ENTRY'
+
+runtime_dir=
+config_file=
+child_pid=
+
+received_signal=
+signal_status=0
+
+parent_status=0
+wrapper_failed=0
+parent_failure_reported=0
+
+state_error=
+
+warn() {
+    printf '%s: %s\n' "$program_name" "$*" >&2
+}
+
+die() {
+    warn "$*"
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 ||
+        die "required command not found: $1"
+}
+
+enforce_auth_policy() {
+    [ "$#" -gt 0 ] || return 0
+    [ "$1" = 'auth' ] || return 0
+
+    shift
+
+    # `glab auth` displays command help and discovery information.
+    [ "$#" -gt 0 ] || return 0
+
+    case $1 in
+    -h | --help)
+        return 0
+        ;;
+
+    status)
+        shift
+
+        for argument; do
+            case $argument in
+            -t | --show-token)
+                die \
+                    'credential disclosure is outside the wrapper compatibility contract'
+                ;;
+            esac
+        done
+
+        return 0
+        ;;
+
+    *)
+        die "unsupported credential-management command: auth $1"
+        ;;
+    esac
+}
+
+resolve_pass_entry() {
+    if [ "${FORGE_CLI_PASS_GITLAB_ENTRY+x}" = x ]; then
+        [ -n "$FORGE_CLI_PASS_GITLAB_ENTRY" ] ||
+            die "$override_name is set but empty"
+
+        pass_entry=$FORGE_CLI_PASS_GITLAB_ENTRY
+    else
+        pass_entry=$default_pass_entry
+    fi
+
+    newline='
+'
+    carriage_return=$(printf '\r')
+
+    case $pass_entry in
+    *"$newline"*)
+        die "$override_name contains a newline"
+        ;;
+    esac
+
+    case $pass_entry in
+    *"$carriage_return"*)
+        die "$override_name contains a carriage return"
+        ;;
+    esac
+}
+
+hash_file() {
+    hash_output=$(command sha256sum -- "$1") || return 1
+
+    printf '%s\n' "${hash_output%% *}"
+}
+
+validate_staged_state() {
+    state_context=$1
+
+    if [ ! -e "$config_file" ]; then
+        state_error="$state_context is missing"
+        return 1
+    fi
+
+    if [ ! -f "$config_file" ]; then
+        state_error="$state_context is not a regular file"
+        return 1
+    fi
+
+    if [ ! -r "$config_file" ]; then
+        state_error="$state_context is unreadable"
+        return 1
+    fi
+
+    if [ ! -s "$config_file" ]; then
+        state_error="$state_context is empty"
+        return 1
+    fi
+
+    return 0
+}
+
+persist_changed_state() {
+    command pass insert \
+        --force \
+        --multiline \
+        "$pass_entry" <"$config_file"
+}
+
+cleanup_runtime() {
+    [ -n "$runtime_dir" ] || return 0
+
+    if [ ! -e "$runtime_dir" ]; then
+        runtime_dir=
+        config_file=
+        return 0
+    fi
+
+    command rm -rf -- "$runtime_dir" || return 1
+
+    runtime_dir=
+    config_file=
+
+    return 0
+}
+
+startup_failure() {
+    trap '' HUP INT TERM
+
+    warn "$1"
+
+    if ! cleanup_runtime; then
+        warn "failed to remove runtime directory: $runtime_dir"
+    fi
+
+    exit 1
+}
+
+terminate_child_for_signal() {
+    child_signal=$1
+
+    # POSIX asynchronous commands inherit SIGINT as ignored when job control
+    # is disabled. TERM therefore provides deterministic child termination for
+    # a wrapper-directed INT. The wrapper still records INT and exits 130.
+    if [ "$child_signal" = 'INT' ]; then
+        child_signal='TERM'
+    fi
+
+    command kill -s "$child_signal" "$child_pid" 2>/dev/null || :
+}
+
+# Invoked indirectly by the HUP, INT, and TERM traps installed below.
+# shellcheck disable=SC2329
+record_signal() {
+    signal_name=$1
+    derived_status=$2
+
+    if [ -z "$received_signal" ]; then
+        received_signal=$signal_name
+        signal_status=$derived_status
+    fi
+
+    if [ -n "$child_pid" ]; then
+        terminate_child_for_signal "$signal_name"
+        return
+    fi
+
+    # No parent CLI is active. Complete any available cleanup and preserve the
+    # signal-derived status.
+    trap '' HUP INT TERM
+
+    if ! cleanup_runtime; then
+        warn "failed to remove runtime directory: $runtime_dir"
+    fi
+
+    exit "$signal_status"
+}
+
+mark_wrapper_failure() {
+    if [ "$parent_status" -ne 0 ] &&
+        [ "$parent_failure_reported" -eq 0 ]; then
+        warn "glab exited with status $parent_status"
+        parent_failure_reported=1
+    fi
+
+    wrapper_failed=1
+}
+
+finish_ordinary() {
+    post_hash=
+
+    wrapper_failed=0
+    parent_failure_reported=0
+
+    if ! validate_staged_state 'staged GitLab configuration'; then
+        mark_wrapper_failure
+        warn "$state_error"
+    elif ! post_hash=$(hash_file "$config_file"); then
+        mark_wrapper_failure
+        warn 'failed to fingerprint staged GitLab state'
+    elif [ "$post_hash" != "$initial_hash" ]; then
+        if ! persist_changed_state; then
+            mark_wrapper_failure
+            warn 'failed to persist changed GitLab authentication state'
+        fi
+    fi
+
+    if ! cleanup_runtime; then
+        mark_wrapper_failure
+        warn "failed to remove runtime directory: $runtime_dir"
+    fi
+
+    if [ "$wrapper_failed" -ne 0 ]; then
+        exit 1
+    fi
+
+    exit "$parent_status"
+}
+
+finish_signal() {
+    post_hash=
+
+    if ! validate_staged_state 'interrupted GitLab state'; then
+        warn "$state_error; retaining the existing pass entry"
+        warn 'GitLab reauthentication may be required'
+    elif ! post_hash=$(hash_file "$config_file"); then
+        warn \
+            'failed to fingerprint interrupted GitLab state; retaining the existing pass entry'
+        warn 'GitLab reauthentication may be required'
+    elif [ "$post_hash" != "$initial_hash" ]; then
+        if ! persist_changed_state; then
+            warn 'failed to persist changed GitLab authentication state'
+            warn \
+                'the existing pass entry may no longer match the refreshed GitLab state'
+        fi
+    fi
+
+    if ! cleanup_runtime; then
+        warn "failed to remove runtime directory: $runtime_dir"
+    fi
+
+    exit "$signal_status"
+}
+
+enforce_auth_policy "$@"
+resolve_pass_entry
+
+require_command pass
+require_command glab
+require_command mktemp
+require_command sha256sum
+
+[ -d /tmp ] &&
+    [ -w /tmp ] &&
+    [ -x /tmp ] ||
+    die '/tmp is not a usable runtime parent'
+
+# Install handlers before creating runtime credential state.
+trap 'record_signal HUP 129' HUP
+trap 'record_signal INT 130' INT
+trap 'record_signal TERM 143' TERM
+
+runtime_dir=$(command mktemp -d /tmp/glab-pass.XXXXXX) ||
+    die 'failed to create runtime directory beneath /tmp'
+
+config_file=$runtime_dir/config.yml
+
+command chmod 700 "$runtime_dir" ||
+    startup_failure 'failed to protect runtime directory'
+
+command pass show "$pass_entry" >"$config_file" ||
+    startup_failure "failed to read credential entry: $pass_entry"
+
+command chmod 600 "$config_file" ||
+    startup_failure 'failed to protect staged GitLab configuration'
+
+[ -f "$config_file" ] ||
+    startup_failure 'staged GitLab configuration is not a regular file'
+
+[ -r "$config_file" ] ||
+    startup_failure 'staged GitLab configuration is unreadable'
+
+[ -s "$config_file" ] ||
+    startup_failure "credential entry is empty: $pass_entry"
+
+initial_hash=$(hash_file "$config_file") ||
+    startup_failure 'failed to fingerprint initial GitLab state'
+
+GLAB_CONFIG_DIR=$runtime_dir command glab "$@" &
+child_pid=$!
+
+# A signal may have arrived in the narrow interval immediately before the child
+# PID became available.
+if [ -n "$received_signal" ]; then
+    terminate_child_for_signal "$received_signal"
+fi
+
+wait "$child_pid"
+parent_status=$?
+
+if [ -n "$received_signal" ]; then
+    # `wait` may return when the wrapper trap runs before the child has fully
+    # terminated. Continue waiting until the child can no longer mutate staged
+    # authentication state.
+    while command kill -0 "$child_pid" 2>/dev/null; do
+        wait "$child_pid" 2>/dev/null || :
+    done
+
+    child_pid=
+
+    # Complete signal-time writeback and cleanup without allowing a repeated
+    # signal to interrupt the credential lifecycle midway.
+    trap '' HUP INT TERM
+
+    finish_signal
+fi
+
+child_pid=
+
+# Once the parent completed normally, finish validation, writeback, and cleanup
+# as one uninterrupted lifecycle.
+trap '' HUP INT TERM
+
+finish_ordinary

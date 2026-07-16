@@ -18,6 +18,7 @@ target=${GH_PASS_UNDER_TEST:-"$repo_root/src/gh-pass"}
 fixture_bin="$script_dir/fixtures/bin"
 original_path=$PATH
 TEST_SHELL_KIND=${TEST_SHELL_KIND:-dash}
+BUSYBOX=${BUSYBOX:-busybox}
 
 suite_start "gh-pass under $TEST_SHELL_KIND"
 
@@ -82,7 +83,7 @@ run_wrapper() {
     ;;
 
   busybox-ash)
-    busybox ash "$target" "$@"
+    "$BUSYBOX" ash "$target" "$@"
     ;;
 
   *)

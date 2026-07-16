@@ -18,6 +18,7 @@ target=${GLAB_PASS_UNDER_TEST:-"$repo_root/src/glab-pass"}
 fixture_bin="$script_dir/fixtures/bin"
 original_path=$PATH
 TEST_SHELL_KIND=${TEST_SHELL_KIND:-dash}
+BUSYBOX=${BUSYBOX:-busybox}
 
 REAL_MKTEMP=$(command -v mktemp) || exit 1
 REAL_SHA256SUM=$(command -v sha256sum) || exit 1
@@ -160,31 +161,6 @@ EOF
   unset GLAB_CONFIG_DIR
 }
 
-set_wrapper_command() {
-  case $TEST_SHELL_KIND in
-  dash)
-    set -- dash "$target" "$@"
-    ;;
-
-  bash-posix)
-    set -- bash --posix "$target" "$@"
-    ;;
-
-  busybox-ash)
-    set -- busybox ash "$target" "$@"
-    ;;
-
-  *)
-    printf 'tests: unknown TEST_SHELL_KIND: %s\n' \
-      "$TEST_SHELL_KIND" >&2
-    return 125
-    ;;
-  esac
-
-  WRAPPER_COMMAND_COUNT=$#
-  WRAPPER_COMMAND=$*
-}
-
 run_wrapper() {
   case $TEST_SHELL_KIND in
   dash)
@@ -196,7 +172,7 @@ run_wrapper() {
     ;;
 
   busybox-ash)
-    busybox ash "$target" "$@"
+    "$BUSYBOX" ash "$target" "$@"
     ;;
 
   *)
@@ -265,7 +241,7 @@ run_wrapper_with_signal() {
     sh -c '
                 printf "%s" "$$" >"$WRAPPER_PID_FILE"
                 exec "$@"
-            ' sh busybox ash "$target" "$@"
+            ' sh "$BUSYBOX" ash "$target" "$@"
     ;;
 
   *)
@@ -827,7 +803,15 @@ test_int_writes_back_changed_signal_state() {
 
   assert_equals '0' "$SIGNALER_STATUS" || return 1
   assert_equals '130' "$RUN_STATUS" || return 1
-  assert_file_equals 'INT' "$FAKE_GLAB_SIGNAL_LOG" || return 1
+
+  # POSIX asynchronous commands inherit SIGINT as ignored when job control is
+  # disabled. glab-pass uses TERM to ensure child termination while preserving
+  # INT as the wrapper's causal signal and final status 130.
+  assert_file_equals \
+    'TERM' \
+    "$FAKE_GLAB_SIGNAL_LOG" \
+    'wrapper INT should terminate the asynchronous child with TERM' ||
+    return 1
 
   assert_exists "$FAKE_PASS_WRITEBACK_CALL_LOG" || return 1
 

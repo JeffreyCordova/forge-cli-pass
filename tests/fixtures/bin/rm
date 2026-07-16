@@ -8,21 +8,20 @@ set -u
 
 target_path=
 
-for argument do
+for argument; do
     target_path=$argument
 done
 
 runtime_path=
 
 if [ -s "$FAKE_MKTEMP_PATH_LOG" ]; then
-    IFS= read -r runtime_path <"$FAKE_MKTEMP_PATH_LOG" ||
+    runtime_path=$(cat -- "$FAKE_MKTEMP_PATH_LOG") ||
         runtime_path=
 fi
 
 if [ "${FAKE_RM_RUNTIME_MODE:-ok}" = 'fail' ] &&
     [ -n "$runtime_path" ] &&
-    [ "$target_path" = "$runtime_path" ]
-then
+    [ "$target_path" = "$runtime_path" ]; then
     printf 'called\n' >"$FAKE_RM_RUNTIME_CALL_LOG"
     exit "${FAKE_RM_RUNTIME_STATUS:-1}"
 fi
