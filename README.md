@@ -1,51 +1,226 @@
 # forge-cli-pass
 
-Command-compatible wrappers for ordinary authenticated GitHub CLI and GitLab CLI operations, with [`pass`](https://www.passwordstore.org/) as the authoritative credential store.
+**Command-compatible security wrappers for ordinary authenticated GitHub CLI
+and GitLab CLI operations, with
+[`pass`](https://www.passwordstore.org/) as the authoritative credential
+store.**
 
-The project provides two commands:
+[![CI](https://github.com/JeffreyCordova/forge-cli-pass/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JeffreyCordova/forge-cli-pass/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/JeffreyCordova/forge-cli-pass?sort=semver)](https://github.com/JeffreyCordova/forge-cli-pass/releases/latest)
+[![License](https://img.shields.io/github/license/JeffreyCordova/forge-cli-pass)](LICENSE)
 
-- `gh-pass` wraps `gh`
-- `glab-pass` wraps `glab`
+`forge-cli-pass` provides two commands:
 
-Both commands preserve the parent CLI’s ordinary argument interface while preventing the parent CLI from becoming the durable owner of wrapper-managed credentials.
+| Wrapper | Parent CLI | Runtime authentication mechanism |
+|---|---|---|
+| `gh-pass` | GitHub CLI, `gh` | First line of a `pass` entry supplied through `GH_TOKEN` |
+| `glab-pass` | GitLab CLI, `glab` | Complete opaque config staged in a private temporary directory |
 
-## Why
+Both wrappers preserve the parent CLI's ordinary command interface while
+preventing the parent CLI from becoming the durable owner of wrapper-managed
+authentication state.
 
-The GitHub CLI and GitLab CLI expose different authentication interfaces.
+> Wrapper-managed authentication state belongs in `pass`, not in persistent
+> parent-CLI configuration.
 
-`gh-pass` retrieves a token from `pass` and supplies its first line to `gh` through `GH_TOKEN`.
+The
+[GitHub repository](https://github.com/JeffreyCordova/forge-cli-pass) is the
+canonical upstream and release location. The
+[GitLab repository](https://gitlab.com/JeffreyCordova/forge-cli-pass) mirrors
+source and release tags.
 
-`glab-pass` restores a complete GitLab CLI configuration from `pass` into a private temporary directory, runs `glab` against that staged state, and writes eligible changes back to `pass`.
+## Why this exists
 
-This gives both providers the same durable credential boundary:
+The GitHub and GitLab CLIs are designed to retain authentication state in their
+normal configuration locations. That is convenient for many systems, but it
+creates a credential-ownership model in which each CLI manages its own durable
+local state.
 
-> Wrapper-managed authentication state belongs in `pass`, not in persistent parent-CLI configuration.
+`forge-cli-pass` selects a narrower model:
 
-Git transport is independent of these wrappers. SSH remains the recommended transport for Git remotes.
+- `pass` owns durable wrapper-managed authentication state.
+- Credentials are restored only for the command being run.
+- The wrappers do not establish persistent parent-CLI login state.
+- Temporary GitLab state is validated, conditionally persisted, and removed.
+- Credential-management and credential-disclosure commands fail closed.
+- Ordinary parent arguments, standard input, output streams, and exit behavior
+  remain compatible.
 
-## Status
+The project is intentionally small, but the credential boundary is treated as
+a security-sensitive system rather than as an informal shell alias.
 
-The project currently targets Linux and the following POSIX shell environments:
+## Security properties
 
+The current design provides these properties under the assumptions documented
+in the [threat model](docs/threat-model.md):
+
+### Durable credential ownership
+
+The documented `pass` entries are authoritative.
+
+The wrappers do not fall back to parent-CLI credential discovery or silently
+adopt authentication state from normal `gh` or `glab` configuration
+directories.
+
+### Provider-specific credential delivery
+
+`gh-pass` and `glab-pass` use different mechanisms because their parent CLIs
+expose different authentication interfaces:
+
+- `gh-pass` injects one token through `GH_TOKEN`.
+- `glab-pass` restores the complete GitLab CLI config as opaque state.
+
+The wrappers share a credential-ownership policy without pretending the two
+providers have identical runtime behavior.
+
+### Private GitLab staging
+
+`glab-pass` creates an unpredictable runtime directory beneath `/tmp`, applies
+mode `0700` to the directory and mode `0600` to the staged config, and points
+`GLAB_CONFIG_DIR` only to that directory for the parent invocation.
+
+### Conditional durable writeback
+
+`glab-pass` fingerprints the staged configuration before and after execution.
+
+Changed state is written back only when the post-command config remains:
+
+- present
+- a regular file
+- readable
+- nonempty
+- successfully fingerprinted
+- different from the initial state
+
+Eligible changed state is persisted after both successful and ordinarily
+unsuccessful parent execution.
+
+### Authentication-policy enforcement
+
+The wrappers allow ordinary authenticated operations and non-disclosing
+authentication status.
+
+Commands that would replace, remove, or disclose wrapper-managed credentials
+are rejected before credential retrieval or staging. Unknown `auth`
+subcommands also fail closed.
+
+### Parent-command compatibility
+
+Allowed commands preserve:
+
+- argument order
+- argument boundaries
+- empty arguments
+- standard input
+- standard output
+- standard error
+- ordinary parent exit status when wrapper obligations succeed
+
+### Failure and signal handling
+
+`glab-pass` applies explicit precedence rules to parent failure, state
+validation, writeback, cleanup, and handled signals.
+
+HUP, INT, and TERM trigger conditional state recovery and cleanup while
+preserving signal-derived statuses `129`, `130`, and `143`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    S[User shell]
+    P[pass and GPG]
+
+    GHP[gh-pass]
+    GH[gh]
+    GHS[GitHub]
+
+    GLP[glab-pass]
+    T[Private /tmp staging]
+    GL[glab]
+    GLS[GitLab]
+
+    S -->|argv, stdin, environment| GHP
+    GHP -->|read token entry| P
+    P -->|first line| GHP
+    GHP -->|GH_TOKEN, argv, stdin| GH
+    GH --> GHS
+
+    S -->|argv, stdin, environment| GLP
+    GLP -->|read opaque config| P
+    P -->|complete config| GLP
+    GLP -->|create and protect| T
+    T -->|GLAB_CONFIG_DIR| GL
+    GL --> GLS
+    GL -->|eligible changed config| T
+    T -->|conditional writeback| P
+```
+
+### GitHub execution path
+
+For each accepted invocation, `gh-pass`:
+
+1. Enforces the authentication-command policy.
+2. Resolves the configured `pass` entry.
+3. Reads the complete entry.
+4. Selects the first line as the GitHub token.
+5. Rejects an empty first line.
+6. Clears the complete retrieved value.
+7. Replaces itself with `gh`, setting `GH_TOKEN` for that process.
+
+Because the wrapper uses `exec`, ordinary `gh` process behavior and exit status
+are inherited directly.
+
+### GitLab execution path
+
+For each accepted invocation, `glab-pass`:
+
+1. Enforces the authentication-command policy.
+2. Resolves the configured `pass` entry.
+3. Creates and protects a private runtime directory.
+4. Restores the complete opaque config as `config.yml`.
+5. Validates and fingerprints the initial state.
+6. Preserves caller standard input.
+7. Runs `glab` asynchronously for signal handling.
+8. Validates and fingerprints post-command state.
+9. Writes changed eligible state back to `pass`.
+10. Removes the runtime directory.
+11. Returns the status required by the documented precedence rules.
+
+The SHA-256 fingerprints detect change. They do not authenticate the config or
+establish its semantic correctness.
+
+## Project status
+
+The current release is
+[`v0.1.1`](https://github.com/JeffreyCordova/forge-cli-pass/releases/tag/v0.1.1).
+
+The project currently targets:
+
+- Linux
+- POSIX `sh`
 - Dash
 - Bash in POSIX mode
 - BusyBox `ash`
 
-The wrappers are tested against ordinary success and failure paths, credential-policy enforcement, temporary-state handling, writeback behavior, cleanup failures, and handled signals.
+The `0.y.z` release line indicates that compatibility details may continue to
+evolve before `1.0.0`.
 
-The project has not yet published a stable tagged release.
+Git transport is outside the wrapper boundary. SSH is recommended for Git
+remotes, while forge CLI and API authentication are handled independently by
+these wrappers.
 
 ## Requirements
 
 ### `gh-pass`
 
-- A POSIX-compatible `sh`
+- POSIX-compatible `sh`
 - `pass`
 - `gh`
 
 ### `glab-pass`
 
-- A POSIX-compatible `sh`
+- POSIX-compatible `sh`
 - `pass`
 - `glab`
 - `mktemp`
@@ -53,17 +228,24 @@ The project has not yet published a stable tagged release.
 - `chmod`
 - `rm`
 
-The commands named above must be available through `PATH`.
+Required commands must be available through `PATH`.
+
+The runtime trust model assumes that the resolved commands and local operating
+environment are not compromised.
 
 ## Installation
 
-The default installation prefix is `/usr/local`:
+### Standard installation
+
+The default prefix is `/usr/local`:
 
 ```sh
 make install
 ```
 
-The Makefile does not invoke a privilege-management command. Run it with the privileges appropriate for the selected destination, or choose a user-owned prefix.
+The Makefile does not invoke `sudo` or another privilege-management command.
+Run installation with the privileges appropriate for the selected destination,
+or choose a user-owned prefix.
 
 For a user-local installation:
 
@@ -71,7 +253,7 @@ For a user-local installation:
 make install PREFIX="$HOME/.local"
 ```
 
-Ensure that the resulting binary directory is in `PATH`:
+Ensure the resulting binary directory is in `PATH`:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -86,7 +268,9 @@ make install BINDIR="$HOME/bin"
 Packaging and staged installations may use `DESTDIR`:
 
 ```sh
-make install DESTDIR="$package_root" PREFIX=/usr
+make install \
+    DESTDIR="$package_root" \
+    PREFIX=/usr
 ```
 
 This installs:
@@ -96,37 +280,42 @@ $package_root/usr/bin/gh-pass
 $package_root/usr/bin/glab-pass
 ```
 
-To remove a copied installation:
+Remove a copied installation with:
 
 ```sh
 make uninstall PREFIX="$HOME/.local"
 ```
 
-`uninstall` removes only the two project command paths. It does not remove the containing directory or unrelated files.
+`uninstall` removes only the two project command paths. It does not remove the
+containing directory or unrelated files.
 
-## Development installation
+### Development installation
 
-A development installation creates absolute symbolic links to the current checkout:
+A development installation creates absolute symbolic links to the current
+checkout:
 
 ```sh
 make dev-install PREFIX="$HOME/.local"
 ```
 
-The operation is intentionally guarded:
+The operation is guarded:
 
-- An expected existing link is accepted.
+- An expected link to the current checkout is accepted.
 - An unrelated symbolic link is not replaced.
 - A regular file or other existing path is not replaced.
 
-Remove only links owned by the current checkout with:
+Remove only development links owned by the current checkout with:
 
 ```sh
 make dev-uninstall PREFIX="$HOME/.local"
 ```
 
-`dev-uninstall` refuses to remove copied installations or symbolic links pointing somewhere else.
+`dev-uninstall` refuses to remove copied installations or links pointing to
+another target.
 
-## GitHub credential setup
+## Credential setup
+
+### GitHub
 
 The default GitHub entry is:
 
@@ -142,17 +331,19 @@ pass insert forge-cli-pass/github/token
 
 The first line must contain the GitHub token.
 
-Only the first line is injected into `GH_TOKEN`. Additional lines may be retained as operator notes, but they are not passed to `gh`.
+Additional lines may contain operator notes, but only the first line is supplied
+to `gh`.
 
-To use another entry:
+To select another entry:
 
 ```sh
 export FORGE_CLI_PASS_GITHUB_ENTRY='work/github/token'
 ```
 
-An explicitly empty override is an error. The wrapper does not fall back to another entry or attempt credential discovery.
+An explicitly empty or structurally invalid override is rejected. The wrapper
+does not fall back to another entry or attempt credential discovery.
 
-## GitLab credential setup
+### GitLab
 
 The default GitLab entry is:
 
@@ -160,11 +351,13 @@ The default GitLab entry is:
 forge-cli-pass/gitlab/oauth-config
 ```
 
-The entry contains the complete opaque `glab` configuration file rather than a single extracted token.
+The entry contains the complete opaque `glab` configuration rather than an
+individually extracted token.
 
-### Initial bootstrap
+#### Initial bootstrap
 
-Run `glab auth login` directly against an isolated temporary configuration directory, then store the resulting file in `pass`:
+Run `glab auth login` directly against an isolated temporary config directory,
+then place the resulting config in `pass`:
 
 ```sh
 (
@@ -180,27 +373,29 @@ Run `glab auth login` directly against an isolated temporary configuration direc
 
     test -s "$bootstrap_dir/config.yml"
 
-    pass insert -m \
+    pass insert \
+        --multiline \
         forge-cli-pass/gitlab/oauth-config \
         <"$bootstrap_dir/config.yml"
 )
 ```
 
-The temporary directory is removed when the subshell exits.
+After bootstrap, run ordinary authenticated operations through `glab-pass`
+rather than maintaining wrapper-managed credentials in the normal persistent
+`glab` config directory.
 
-After the entry has been created, ordinary authenticated operations should be run through `glab-pass`, not through persistent default `glab` authentication state.
-
-To use another entry:
+To select another entry:
 
 ```sh
 export FORGE_CLI_PASS_GITLAB_ENTRY='work/gitlab/oauth-config'
 ```
 
-As with the GitHub override, an explicitly empty or structurally invalid entry name is rejected without fallback or discovery.
+As with the GitHub override, an explicitly empty or structurally invalid entry
+name is rejected without fallback or discovery.
 
 ## Usage
 
-Arguments are forwarded to the corresponding parent CLI without reordering or recombination.
+Arguments are forwarded directly to the corresponding parent CLI.
 
 ### GitHub
 
@@ -218,20 +413,34 @@ glab-pass issue list
 glab-pass api projects/PROJECT_ID
 ```
 
-Empty arguments, arguments containing spaces, and shell metacharacters remain distinct parent arguments.
+Piped standard input is preserved:
+
+```sh
+printf '%s\n' '{"description":"example"}' |
+    glab-pass api \
+        --method PUT \
+        --header 'Content-Type: application/json' \
+        projects/PROJECT_ID \
+        --input -
+```
+
+Empty arguments, arguments containing spaces, and shell metacharacters remain
+distinct parent arguments when quoted correctly by the caller.
 
 ## Authentication-command policy
 
-These wrappers support ordinary authenticated operations. They are not interfaces for managing or disclosing wrapper-owned credentials.
+These wrappers support ordinary authenticated operations. They are not
+interfaces for managing or displaying wrapper-owned credentials.
 
-Non-disclosing authentication status commands are allowed:
+Non-disclosing status commands are allowed:
 
 ```sh
 gh-pass auth status
 glab-pass auth status
 ```
 
-Credential-management and credential-disclosure operations are rejected before credential retrieval or staging. Examples include:
+Credential-management and credential-disclosure commands are rejected before
+credential retrieval or staging. Examples include:
 
 ```sh
 gh-pass auth login
@@ -245,158 +454,210 @@ glab-pass auth logout
 glab-pass auth status --show-token
 ```
 
-Unknown `auth` subcommands are also rejected. This prevents a future parent-CLI authentication command from silently bypassing the wrapper’s credential-ownership policy.
+Unknown `auth` subcommands are rejected.
 
-Arguments that merely contain auth-like text outside the parent CLI’s `auth` command namespace are forwarded normally.
+Arguments that merely contain auth-like text outside the parent CLI's `auth`
+command namespace are forwarded normally.
 
-## GitHub runtime behavior
+## Exit statuses and failure precedence
 
-For each accepted invocation, `gh-pass`:
+### Ordinary execution
 
-1. Resolves the configured `pass` entry.
-2. Reads the complete entry.
-3. Selects the first line as the token.
-4. Rejects an empty first line.
-5. Clears the complete retrieved value.
-6. Executes `gh` with `GH_TOKEN` set to the selected token.
-
-Because the wrapper replaces itself with `gh`, the parent CLI’s exit status is returned directly.
-
-## GitLab runtime behavior
-
-For each accepted invocation, `glab-pass`:
-
-1. Creates a private temporary directory beneath `/tmp`.
-2. Protects the directory with mode `0700`.
-3. Restores the complete `pass` entry as `config.yml`.
-4. Protects the staged file with mode `0600`.
-5. Records the initial-state fingerprint.
-6. Runs `glab` with `GLAB_CONFIG_DIR` pointing to the temporary directory.
-7. Validates and fingerprints the post-command state.
-8. Writes changed eligible state back to `pass`.
-9. Removes the temporary directory.
-
-Eligible post-command state must be:
-
-- Present
-- A regular file
-- Readable
-- Nonempty
-- Different from the initial state
-
-Changed eligible state is written back after both successful and ordinarily unsuccessful `glab` execution. This preserves authentication refreshes or other legitimate state mutations that occur before the parent command exits.
-
-## Signals and exit statuses
-
-The wrappers use these status rules:
-
-- An ordinary parent status is preserved when all wrapper obligations succeed.
+- The exact parent status is preserved when all wrapper obligations succeed.
 - An ordinary wrapper failure returns status `1`.
-- Handled `HUP`, `INT`, and `TERM` preserve statuses `129`, `130`, and `143`.
-- A required writeback or cleanup failure overrides an ordinary parent status.
-- During handled-signal processing, writeback or cleanup failures are reported without replacing the signal-derived status.
+- Required validation, writeback, or cleanup failure overrides an ordinary
+  parent status.
+- When multiple failures occur, diagnostics retain relevant parent and wrapper
+  failure context.
 
-Signal-time writeback is attempted only when staged GitLab state remains eligible.
+### Handled signals
 
-## Security boundaries
+- HUP returns `129`.
+- INT returns `130`.
+- TERM returns `143`.
 
-The wrappers are designed to prevent durable wrapper-managed credentials from being left in parent-CLI authentication storage.
+During handled-signal processing, eligible state writeback and cleanup are
+attempted.
+
+A signal-time writeback or cleanup failure is reported but does not replace the
+signal-derived status.
+
+## Security boundaries and non-goals
+
+The wrappers reduce persistent parent-CLI credential residue. They are not a
+vault, sandbox, privilege boundary, or isolated credential broker.
 
 They do not protect against:
 
-- A compromised local account
-- A compromised shell, parent CLI, `pass`, GPG agent, or operating system
-- A malicious executable earlier in `PATH`
-- Parent-CLI vulnerabilities
-- Credentials deliberately printed or transmitted by an ordinary parent command
-- Insecure Git remote or SSH configuration
+- a compromised local account
+- root or another actor able to bypass filesystem permissions
+- a compromised `pass` store, GPG key, or GPG agent
+- a malicious or compromised shell, parent CLI, dependency, kernel, or
+  filesystem
+- a malicious executable earlier in `PATH`
+- parent-CLI extensions or plugins
+- credentials deliberately printed or transmitted by an ordinary parent
+  command
+- process inspection by a sufficiently privileged actor
+- insecure Git remote, SSH, proxy, certificate, or network configuration
+- semantic corruption of an otherwise structurally valid opaque GitLab config
+- secure erasure from journals, snapshots, swap, or underlying storage
+- cleanup or writeback after SIGKILL, kernel failure, power loss, or machine
+  reset
 
-The wrappers disable shell tracing before handling credentials, but callers remain responsible for their surrounding process and logging environment.
+The wrappers disable shell tracing before handling credentials, but callers
+remain responsible for their surrounding shell, process, logging, and terminal
+environment.
 
-See [SECURITY.md](SECURITY.md) for vulnerability-reporting guidance.
+See the complete [threat model](docs/threat-model.md) and
+[security assurance case](docs/security-assurance.md) for detailed assumptions,
+controls, evidence, and residual risks.
 
 ## Verification
 
-Run the complete local verification interface with:
+Run the accepted local verification interface with:
 
 ```sh
 make check
 ```
 
-The check includes:
-
-- ShellCheck in POSIX `sh` mode
-- Syntax checks under Dash
-- Syntax checks under Bash POSIX mode
-- Syntax checks under BusyBox `ash`
-- Behavioral tests under all three shells
-- Installation and development-link tests
-
-The behavioral suite injects fake utilities through `PATH`. Some BusyBox builds prefer internal applets even when a matching external command appears earlier in `PATH`. Such a build cannot run the complete failure-injection matrix.
-
 A compatible BusyBox executable may be supplied explicitly:
 
 ```sh
-make check BUSYBOX=/path/to/busybox
+make check \
+    BUSYBOX=/path/to/compatible/busybox
 ```
 
-The test runner verifies the required `PATH` behavior before starting the matrix. Failure of that test-specific probe does not by itself demonstrate a runtime incompatibility with the wrappers.
+The verification interface includes:
 
-The current verification suite contains:
+| Layer | Coverage |
+|---|---|
+| Static analysis | ShellCheck in POSIX `sh` mode |
+| Syntax | Dash, Bash POSIX mode, and BusyBox `ash` |
+| GitHub behavior | Entry selection, policy enforcement, argument fidelity, token extraction, exact status |
+| GitLab behavior | Private staging, state validation, writeback, cleanup, stdin, signals, failure precedence |
+| Installation | `DESTDIR`, custom prefixes, narrow uninstall, guarded development links |
+| Continuous integration | The same `make check` interface on GitHub Actions |
 
-- 141 wrapper test executions across three shells
+The current suite performs:
+
+- 51 `gh-pass` behavioral executions across three shells
+- 93 `glab-pass` behavioral executions across three shells
 - 8 installation and development-link tests
-- 149 total behavioral test executions
+- **152 total behavioral and installation test executions**
+
+The test harness injects controlled fake utilities through `PATH`.
+
+Some BusyBox builds prefer internal applets even when an external command
+appears earlier in `PATH`. Such builds cannot run the complete
+failure-injection matrix. The test runner probes for the required behavior
+before beginning the matrix.
+
+This test-specific limitation does not by itself establish a runtime
+incompatibility with the wrappers.
 
 ### Continuous integration
 
-The primary GitHub repository runs the same `make check` interface for pull requests, pushes to `main`, and manual workflow runs.
+The canonical GitHub repository runs the complete verification interface for:
 
-CI builds a pinned, test-only BusyBox `ash` executable whose configuration permits the failure-injection fixtures to take precedence through `PATH`. The downloaded source archive is verified before it is built.
+- pushes to `main`
+- pull requests
+- manual workflow runs
 
-The workflow does not use forge credentials, password-store contents, or real authentication state.
+CI builds a pinned, test-only BusyBox executable from a checksum-verified source
+archive. Its configuration permits the controlled test fixtures to take
+precedence through `PATH`.
 
-The GitLab repository is currently a mirror and does not run a duplicate pipeline.
+The CI workflow does not use real forge credentials, password-store contents,
+or persistent authentication state.
 
-## Versioning and releases
-
-`forge-cli-pass` uses [Semantic Versioning](https://semver.org/).
-
-Release versions are recorded in the root [`VERSION`](VERSION) file and use
-annotated `v`-prefixed Git tags, such as `v0.1.0`.
-
-The GitHub repository is the canonical release location. The GitLab repository
-mirrors release tags.
-
-Initial releases contain source only. See
-[`CHANGELOG.md`](CHANGELOG.md) for release history.
+The GitLab repository is a source and tag mirror and does not currently run a
+duplicate pipeline.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
+### Security and assurance
+
+- [Threat model](docs/threat-model.md)
+- [Security assurance case](docs/security-assurance.md)
+- [Security reporting policy](SECURITY.md)
+
+### Architecture and decisions
+
+- [Current architecture](docs/architecture.md)
+- [Architecture Decision Records](docs/decisions/)
 - [Project context](docs/project-context.md)
-- [Architecture decision records](docs/decisions/)
+
+### Project operation
+
 - [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+- [Version](VERSION)
+
+Accepted ADRs are authoritative for architectural decisions. The architecture
+document integrates those decisions into the current design. The threat model,
+assurance case, implementation, and tests must remain consistent with them.
+
+## Versioning and releases
+
+`forge-cli-pass` uses
+[Semantic Versioning](https://semver.org/).
+
+Release versions are recorded in [`VERSION`](VERSION), and releases use
+annotated `v`-prefixed Git tags.
+
+Before publication, a release commit must:
+
+- be on `main`
+- have a clean tree and index
+- match `VERSION` and `CHANGELOG.md`
+- pass the complete local verification interface
+- pass CI for the exact release commit
+- exist on both GitHub and GitLab
+
+Release tags are pushed to both upstreams.
+
+GitHub provides the canonical release record. GitLab mirrors the corresponding
+source tag.
+
+Current releases distribute source only. Published tags are not moved or
+reused; corrections are issued as new versions.
+
+See [ADR 0013](docs/decisions/0013-versioning-and-release-publication.md)
+for the authoritative release decision.
+
+## Contributing
+
+Changes should preserve:
+
+- the `pass` credential-ownership boundary
+- POSIX shell portability
+- parent argument and standard-input fidelity
+- authentication-policy enforcement
+- GitLab state-validation and writeback behavior
+- deterministic status and signal semantics
+- installation-path ownership
+- traceability between threats, controls, tests, and decisions
+
+Run the complete verification interface before submitting a change:
+
+```sh
+make check \
+    BUSYBOX=/path/to/compatible/busybox
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the project workflow.
+
+## Reporting security issues
+
+Do not report suspected vulnerabilities through a public issue.
+
+Follow the private reporting instructions in [SECURITY.md](SECURITY.md).
 
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
 
-The SPDX license identifier is:
-
 ```text
-Apache-2.0
+SPDX-License-Identifier: Apache-2.0
 ```
-
-## Contributing
-
-Contributions should preserve the documented credential-ownership boundary, POSIX shell portability, argument fidelity, and failure semantics.
-
-Run the complete verification interface before submitting a change:
-
-```sh
-make check BUSYBOX=/path/to/compatible/busybox
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the project workflow.
