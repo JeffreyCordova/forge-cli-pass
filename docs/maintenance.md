@@ -196,8 +196,8 @@ Avoid adding dependencies solely to shorten otherwise clear shell code.
 
 The canonical repository is GitHub.
 
-GitLab mirrors source branches and release tags but does not currently publish
-an independently maintained release record.
+GitLab mirrors the canonical `main` branch and release tags but does not
+currently publish an independently maintained release record.
 
 ### Protected `main`
 
@@ -223,6 +223,15 @@ New release tags may be created, but existing release tags must not be moved or
 reused.
 
 Corrections are published through a new version and tag.
+
+### Repository security automation
+
+GitHub Actions dependencies are pinned to full commit identifiers and monitored
+by Dependabot through weekly update pull requests.
+
+OpenSSF Scorecard runs after pushes to `main` and on a weekly schedule. Its
+findings are reviewed as supplemental evidence; Scorecard is not a substitute
+for `make check` and is not a required pull-request status check.
 
 ### Normal change workflow
 
@@ -268,50 +277,67 @@ Push the topic branch to GitHub:
 git push --set-upstream github HEAD
 ```
 
-Create the pull request:
+Capture the branch name and create the pull request:
 
 ```sh
+branch=$(git branch --show-current)
+
 src/gh-pass pr create \
     --repo JeffreyCordova/forge-cli-pass \
+    --head "$branch" \
+    --base main \
     --fill
 ```
 
-Wait for the required check:
+Wait for the required check. The installed GitHub CLI requires an explicit pull
+request selector when `--repo` is present:
 
 ```sh
-src/gh-pass pr checks \
+src/gh-pass pr checks "$branch" \
     --repo JeffreyCordova/forge-cli-pass \
-    --watch
+    --required \
+    --watch \
+    --fail-fast
 ```
 
-Review the complete pull-request diff before merging:
+Review the complete server-side pull-request diff:
 
 ```sh
-src/gh-pass pr diff \
+src/gh-pass pr diff "$branch" \
     --repo JeffreyCordova/forge-cli-pass
 ```
 
-After the pull request is merged, update local `main`:
+Merge only the exact head commit that was reviewed:
+
+```sh
+pr_head=$(git rev-parse HEAD)
+
+src/gh-pass pr merge "$branch" \
+    --repo JeffreyCordova/forge-cli-pass \
+    --squash \
+    --delete-branch \
+    --match-head-commit "$pr_head"
+```
+
+After the pull request is merged, update local `main`, mirror it to GitLab, and
+prune stale remote-tracking references:
 
 ```sh
 git switch main
 git pull --ff-only github main
-```
-
-Mirror the resulting canonical branch to GitLab:
-
-```sh
 git push gitlab main
+git fetch --all --prune
 ```
 
-Delete the local topic branch after confirming the merge:
+Because squash merging does not make the topic commit an ancestor of `main`,
+delete the local topic branch explicitly after confirming the merge:
 
 ```sh
-git branch -d TYPE/short-description
+git branch -D "$branch"
 ```
 
 The GitHub pull request is the canonical change record. GitLab receives the
-resulting branch state.
+resulting `main` state.
 
 ## Change classification
 
@@ -871,6 +897,9 @@ Check:
 - stale supported-version statements
 - open private vulnerability reports
 - repository ruleset enforcement
+- pending Dependabot action updates
+- OpenSSF Scorecard findings
+- OpenSSF Best Practices badge assessment status
 - GitHub and GitLab branch synchronization
 - release-tag synchronization
 - README examples against current CLI behavior

@@ -622,12 +622,21 @@ under every supported shell and checks installation behavior independently.
 - Installation tests run separately.
 - The CI test BusyBox is built from a checksum-verified upstream source archive.
 - CI invokes the same accepted `make check` interface used locally.
+- GitHub requires the `CI/Verify` check to pass against the current target
+  branch before `main` is updated.
+- External Actions are pinned to full commit identifiers and monitored through
+  Dependabot updates.
+- OpenSSF Scorecard provides a supplemental repository assessment without
+  replacing behavioral verification.
 
 **Evidence**
 
 - ADR 0004: language, platform, shell, and utility baseline.
 - ADR 0012: GitHub Actions verification.
 - `.github/workflows/ci.yml`
+- `.github/workflows/scorecard.yml`
+- `.github/dependabot.yml`
+- protected `main` ruleset
 - `ci/build-test-busybox.sh`
 - `tests/run.sh`
 - `tests/test-gh-pass.sh`
@@ -673,6 +682,7 @@ A release requires:
 - the tag pushed to both upstreams
 - verification that both remote tags resolve to the release commit
 - GitHub release creation with an already-existing remote tag
+- protection of `v*` tags against update and deletion
 - immutable correction through a new version rather than tag movement
 
 **Evidence**
@@ -684,6 +694,7 @@ A release requires:
   - `v0.1.0`
   - `v0.1.1`
 - matching GitHub and GitLab tags
+- protected release-tag ruleset
 - GitHub Actions records
 - canonical GitHub release records
 

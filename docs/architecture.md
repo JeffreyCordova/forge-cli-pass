@@ -65,6 +65,9 @@ The current architecture incorporates:
 | 0008 | Restrict credential-management commands |
 | 0009 | Use default `pass` entries with environment overrides |
 | 0010 | Use copy-based Make installation and tagged source releases |
+| 0011 | License the project under Apache-2.0 |
+| 0012 | Verify the project in GitHub Actions |
+| 0013 | Use Semantic Versioning and publish from annotated tags |
 
 ## System summary
 
@@ -119,6 +122,7 @@ The architecture is intended to:
   locations
 - support ordinary authenticated `gh` and `glab` operations
 - preserve parent CLI argument boundaries
+- preserve parent standard input and output streams
 - preserve parent exit statuses when wrapper obligations succeed
 - make wrapper lifecycle failures visible
 - minimize persistent plaintext credential residue
@@ -154,8 +158,8 @@ The project does not:
 - configure Git or Docker credential helpers
 - provide multi-user policy enforcement
 - guarantee forensic erasure
-- initially support non-Linux operating systems
-- initially provide native distribution packages
+- support non-Linux operating systems without explicit verification
+- provide project-maintained native distribution packages
 - automatically update itself
 
 ## Terminology
@@ -164,7 +168,7 @@ The project does not:
 
 A source-code collaboration platform such as GitHub or GitLab.
 
-The initial implementation supports only GitHub and GitLab.
+The current implementation supports only GitHub and GitLab.
 
 ### Parent CLI
 
@@ -312,8 +316,9 @@ execution.
 
 ### 8. Parent behavior is preserved within the compatibility boundary
 
-For supported operations, wrapper arguments retain their order and boundaries
-and are delegated to the parent CLI.
+For supported operations, wrapper arguments retain their order and boundaries,
+standard input remains available to the parent process, and output streams are
+left under parent CLI control.
 
 The wrapper does not reconstruct the parent command as a shell string.
 
@@ -603,7 +608,8 @@ The intended ordinary `glab-pass` lifecycle is:
 11. apply config-file mode `0600`
 12. validate the initial staged file
 13. compute the initial content fingerprint
-14. invoke `glab` with `GLAB_CONFIG_DIR` scoped to the runtime directory
+14. preserve caller standard input and invoke `glab` with `GLAB_CONFIG_DIR`
+    scoped to the runtime directory
 15. record the exact parent status immediately
 16. validate the post-command staged config
 17. compute the post-command fingerprint
@@ -678,13 +684,12 @@ GLAB_CONFIG_DIR=<private runtime directory>
 The environment assignment is scoped to the `glab` invocation.
 
 All supported parent arguments are forwarded in their original order and
-boundaries through:
+boundaries through a non-evaluating `"$@"` invocation.
 
-```sh
-glab "$@"
-```
-
-or an equivalent non-evaluating invocation.
+Because `glab-pass` runs the parent asynchronously for signal coordination, it
+preserves the caller's descriptor 0 before launch and restores that descriptor
+as the child's standard input. Standard output and standard error remain
+inherited.
 
 ### Change detection
 
@@ -1365,9 +1370,9 @@ It must retain:
 
 ## Distribution architecture
 
-The initial distribution unit is a source checkout or tagged source archive.
+The distribution unit is a source checkout or tagged source archive.
 
-A release archive must contain enough material to inspect, test, and install the
+A release archive contains enough material to inspect, test, and install the
 project, including:
 
 ```text
@@ -1377,25 +1382,22 @@ tests/
 docs/
 README.md
 CONTRIBUTING.md
+SECURITY.md
+CHANGELOG.md
+VERSION
 LICENSE
 ```
 
-When present, it should also contain:
+Release distribution consists of:
 
-```text
-SECURITY.md
-CHANGELOG.md
-```
-
-Initial release distribution consists of:
-
-- versioned Git tags
-- GitHub as the primary public release location
+- Semantic Versioning
+- annotated `v`-prefixed Git tags
+- GitHub as the canonical release location
 - corresponding tags mirrored to GitLab
 - source archives associated with released tags
 - installation from an unpacked source tree through `make install`
 
-The project does not initially provide:
+The project does not provide:
 
 - `curl | sh`
 - another remote shell installer
@@ -1471,6 +1473,7 @@ Tests must cover:
 - opaque config restoration
 - initial validation
 - parent argument preservation
+- standard-input preservation
 - unchanged-state behavior
 - changed-state writeback after parent success
 - changed-state writeback after ordinary parent failure
@@ -1515,47 +1518,65 @@ make check
 This command is the supported local, CI, packaging, and release-preparation
 verification interface.
 
-## Expected repository structure
+## Repository controls
 
-The implementation is expected to converge on:
+GitHub is the canonical repository and enforces these operational controls:
+
+- changes to `main` arrive through pull requests
+- the required `CI/Verify` check must pass against the current target branch
+- force pushes and deletion of `main` are blocked
+- release tags matching `v*` are protected against update and deletion
+- external GitHub Actions are pinned to full commit identifiers
+- Dependabot monitors GitHub Actions dependencies through update pull requests
+- OpenSSF Scorecard runs after pushes to `main` and on a weekly schedule
+
+The Scorecard workflow is a supplemental repository assessment. It does not
+replace the project's behavioral verification interface and is not a required
+pull-request check.
+
+GitLab mirrors the canonical `main` branch and release tags. It does not run a
+duplicate verification pipeline.
+
+## Current repository structure
 
 ```text
 forge-cli-pass/
-├── Makefile
-├── README.md
-├── CONTRIBUTING.md
-├── LICENSE
-├── SECURITY.md
+├── .github/
+│   ├── dependabot.yml
+│   └── workflows/
+│       ├── ci.yml
+│       └── scorecard.yml
+├── ci/
+│   └── build-test-busybox.sh
+├── docs/
+│   ├── architecture.md
+│   ├── case-studies/
+│   │   └── 001-stdin-preservation.md
+│   ├── decisions/
+│   │   ├── README.md
+│   │   └── 0001-... through 0013-...
+│   ├── maintenance.md
+│   ├── project-context.md
+│   ├── security-assurance.md
+│   └── threat-model.md
 ├── src/
 │   ├── gh-pass
 │   └── glab-pass
 ├── tests/
-│   ├── fixtures/
-│   ├── helpers/
+│   ├── fixtures/bin/
+│   ├── helpers/testlib.sh
+│   ├── run.sh
 │   ├── test-gh-pass.sh
 │   ├── test-glab-pass.sh
-│   ├── test-install.sh
-│   └── run.sh
-└── docs/
-    ├── architecture.md
-    ├── project-context.md
-    └── decisions/
-        ├── README.md
-        ├── 0001-provider-specific-commands.md
-        ├── 0002-project-identity-and-terminology.md
-        ├── 0003-pass-as-authoritative-store.md
-        ├── 0004-runtime-language-and-platform-support.md
-        ├── 0005-gitlab-runtime-state-and-writeback.md
-        ├── 0006-failure-and-exit-status-semantics.md
-        ├── 0007-signal-driven-gitlab-writeback.md
-        ├── 0008-credential-management-command-policy.md
-        ├── 0009-credential-entry-configuration.md
-        └── 0010-installation-and-distribution.md
+│   └── test-install.sh
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── Makefile
+├── README.md
+├── SECURITY.md
+└── VERSION
 ```
-
-`SECURITY.md`, tests, and the final license may not exist during early
-implementation, but they are required before the first public release under the
-current distribution contract.
 
 ## Operational documentation boundary
 
@@ -1580,29 +1601,27 @@ User-facing documentation must explain:
 Bootstrap documentation must not encourage unisolated login behavior that
 recreates the original persistent-state problem.
 
-## Deferred decisions
+## Future architectural decisions
 
-The following concerns are deferred and do not block wrapper implementation:
+The following concerns remain outside the accepted public contract:
 
-- release versioning
-- tag signing
-- release checksums
+- project-maintained release checksums
 - provenance attestations
-- release automation
+- automated release publication
 - native package ownership
-- future non-Linux support
-- future alternate fingerprint utilities
-- future config-file support
+- non-Linux support
+- alternate fingerprint utilities
+- project configuration files
 - structured machine-readable wrapper errors
 - expanded wrapper-specific exit codes
 - support for additional forges
 - support for additional GitLab authentication files
-- support for new parent `auth` subcommands
-- parent-global-option placements not included in the initial compatibility
-  tests
+- newly introduced parent `auth` subcommands
+- parent-global-option placements not included in the compatibility tests
+- a mandatory release-tag signature policy beyond annotated tags
 
-A deferred concern requires a new or superseding decision when it would change
-an accepted public contract.
+A future concern requires a new or superseding decision when it would change an
+accepted public contract.
 
 ## Implementation risks
 
@@ -1663,7 +1682,7 @@ Both wrappers:
 
 - use POSIX shell
 - validate non-baseline dependencies
-- preserve ordinary parent arguments
+- preserve ordinary parent arguments and standard input
 - restrict credential-management commands
 - avoid credential-source fallback
 - report wrapper lifecycle failures

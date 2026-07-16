@@ -339,27 +339,29 @@ The earlier command names may remain private shell aliases but are not part of t
 
 ## Current maturity
 
-The project is undergoing an architecture and assurance pass before its first public release.
+`forge-cli-pass` is publicly released in the `v0.1.x` development line.
 
-The following decisions are accepted:
+The implemented and accepted system includes:
 
-* separate provider-specific wrapper commands
+* provider-specific `gh-pass` and `glab-pass` commands
 * `pass` as the authoritative durable credential store
-* SSH remaining outside the wrappers’ responsibility
-* `gh-pass` using token injection
-* `glab-pass` using temporary credential staging and conditional writeback
-* the approved project identity and terminology model
-* command compatibility for ordinary authenticated operations
+* POSIX `sh` on Linux, verified under Dash, Bash in POSIX mode, and BusyBox
+  `ash`
+* deterministic default entries with explicit environment overrides
+* private GitLab runtime staging and conditional writeback
+* explicit ordinary-failure and handled-signal semantics
+* fail-closed credential-management command policy
+* copy installation, guarded development links, and source-only releases
+* Apache-2.0 licensing
+* GitHub Actions verification through the same `make check` interface used
+  locally
+* Semantic Versioning with annotated tags mirrored to GitLab
+* threat modeling, a security assurance case, and a maintenance guide
 
-The following areas remain under design:
+The project remains pre-`1.0.0`. Continued real-world use may reveal additional
+compatibility assumptions, as demonstrated by the standard-input regression
+corrected in `v0.1.1`.
 
-* runtime shell language
-* supported platform contract
-* installation and distribution model
-* configuration and credential-entry overrides
-* compatibility policy for credential-management commands
-* GitLab writeback behavior after unsuccessful parent commands
-* exact change-detection mechanism
-* release and packaging model
-
-These decisions are documented separately and must be resolved before the first stable release.
+Future changes that alter the credential boundary, supported platform, public
+compatibility contract, distribution model, or release process require a new or
+superseding architecture decision.

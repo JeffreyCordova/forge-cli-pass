@@ -1,4 +1,3 @@
-
 # Contributing to `forge-cli-pass`
 
 Thank you for contributing to `forge-cli-pass`.
@@ -12,19 +11,22 @@ Because the project handles authentication material, contributions must preserve
 
 ## Project status
 
-`forge-cli-pass` is currently undergoing its initial architecture and assurance pass before its first public release.
+`forge-cli-pass` is an active, released project in the `v0.1.x` development
+line.
 
-Some areas remain under design, including:
+The current supported baseline is:
 
-* runtime shell language
-* supported platform contract
-* installation and distribution model
-* credential-entry configuration
-* credential-management command compatibility
-* GitLab writeback behavior after parent-command failure
-* release and packaging conventions
+* Linux
+* POSIX `sh`
+* Dash
+* Bash in POSIX mode
+* BusyBox `ash`
+* `pass` as the authoritative credential store
+* provider-specific `gh-pass` and `glab-pass` commands
+* source-only releases published from annotated tags
 
-Before implementing behavior in one of these areas, review the current architecture documentation and open or reference an architecture decision.
+Substantial changes to this baseline require review against the accepted
+architecture decisions, threat model, assurance case, and maintenance guide.
 
 ## Start here
 
@@ -32,12 +34,21 @@ Read these documents before making substantial changes:
 
 * [`docs/project-context.md`](docs/project-context.md)
 * [`docs/architecture.md`](docs/architecture.md)
-* architecture decision records under `docs/decisions/`, when present
+* [`docs/threat-model.md`](docs/threat-model.md)
+* [`docs/security-assurance.md`](docs/security-assurance.md)
+* [`docs/maintenance.md`](docs/maintenance.md)
+* [`docs/decisions/`](docs/decisions/)
 * [`SECURITY.md`](SECURITY.md), when reporting a vulnerability
 
 `docs/project-context.md` explains why the project exists.
 
-`docs/architecture.md` defines the current system boundaries, credential flows, security invariants, accepted decisions, and open architectural questions.
+`docs/architecture.md` integrates the current system boundaries, credential
+flows, security invariants, and accepted decisions.
+
+Accepted Architecture Decision Records (ADRs) are authoritative. The threat
+model records assets, trust boundaries, threats, and residual risks. The
+assurance case maps security claims to implementation controls and evidence.
+The maintenance guide defines the operational change and release workflow.
 
 ## Contribution principles
 
@@ -70,8 +81,11 @@ For supported commands:
 
 * preserve argument order and boundaries
 * forward arguments without semantic reinterpretation
+* preserve standard input
 * allow the parent CLI to control normal output
-* preserve relevant parent exit behavior
+* preserve standard output and standard error
+* preserve the exact ordinary parent exit status when wrapper obligations
+  succeed
 * avoid unnecessary modification of parent CLI state
 
 ### Minimize credential exposure
@@ -138,20 +152,22 @@ Do not open a public issue for a suspected vulnerability involving:
 * cleanup failures that expose reusable credential material
 
 Follow the private reporting instructions in [`SECURITY.md`](SECURITY.md).
-
-If `SECURITY.md` or private reporting is not yet available, contact the maintainer privately rather than publishing exploit details.
+GitHub private vulnerability reporting is the preferred intake mechanism.
 
 ## Development setup
 
 Clone the repository and inspect the current state:
 
 ```sh
-git clone REPOSITORY_URL
+git clone https://github.com/JeffreyCordova/forge-cli-pass.git
 cd forge-cli-pass
 
 git status --short
 git log --oneline --decorate --max-count=10
 ```
+
+The GitHub repository is canonical. GitLab mirrors the canonical `main` branch
+and release tags.
 
 Do not use real production credentials in development or tests.
 
@@ -165,7 +181,22 @@ Tests should use:
 * no real forge accounts
 * no production password store
 
-The exact supported shell and test commands will be documented after the runtime-language decision is accepted.
+Run the accepted verification interface with:
+
+```sh
+make check
+```
+
+A compatible BusyBox executable may be supplied explicitly:
+
+```sh
+make check \
+    BUSYBOX=/path/to/compatible/busybox
+```
+
+The verification interface runs ShellCheck, syntax checks under Dash, Bash in
+POSIX mode, and BusyBox `ash`, the complete behavioral matrix, and installation
+tests.
 
 ## Making changes
 
@@ -195,6 +226,7 @@ Changes affecting runtime behavior should include tests covering:
 * credential confidentiality
 * filesystem state
 * parent CLI argument forwarding
+* standard-input preservation when applicable
 * persistent-state effects
 
 A security-relevant fix should include a regression test whenever practical.
@@ -254,9 +286,13 @@ Accepted decision records should not be silently rewritten when the decision lat
 
 ## Coding expectations
 
-Until the runtime-language decision is finalized, avoid introducing new shell-specific dependencies or broad rewrites.
+The runtime implementation language is POSIX `sh`.
 
-Regardless of the selected shell:
+Code must remain compatible with Dash, Bash in POSIX mode, and BusyBox `ash`.
+Avoid shell-specific extensions and do not broaden the supported baseline
+without an accepted architecture decision.
+
+For shell source:
 
 * quote expansions unless deliberate splitting is required
 * forward user arguments using `"$@"`
@@ -308,6 +344,7 @@ Behavioral tests should cover at least:
 * token availability to the child process
 * token absence from wrapper diagnostics
 * parent exit-status propagation
+* standard-input inheritance
 * inherited tracing behavior
 * absence of persistent wrapper-managed GitHub authentication state
 
@@ -325,6 +362,7 @@ Behavioral tests should cover at least:
 * credential-state writeback
 * writeback failure
 * parent success and failure
+* standard-input preservation
 * handled signals
 * cleanup behavior
 * credential absence from wrapper diagnostics
@@ -384,17 +422,17 @@ Changes affecting credential flow, trust boundaries, permissions, cleanup, write
 Example:
 
 ```text
-fix(glab-pass): reject unsafe runtime directories
+fix(glab-pass): reject non-regular post-command state
 
-Require the selected runtime directory to be owned by the current user
-before staging GitLab OAuth configuration beneath it. Fall back to the
-documented temporary-directory strategy when the configured directory
-does not satisfy the ownership and permission requirements.
+Refuse to persist a staged GitLab configuration that is no longer a regular
+file after the parent command exits. Retain the existing pass entry, report
+the wrapper failure, and continue attempting runtime cleanup.
 
-This prevents wrapper-managed credential state from being staged beneath
-a directory controlled by another local account.
+This prevents a parent-side filesystem mutation from replacing durable
+credential state with an ineligible object.
 
-Tests cover incorrect ownership, permissive modes, and fallback behavior.
+Tests cover the non-regular state, absence of writeback, cleanup, and final
+wrapper status.
 ```
 
 The body should explain:
@@ -416,6 +454,14 @@ feat(gh-pass)!: rename the default credential entry
 Do not label internal refactoring as a breaking change unless it changes the public interface or documented behavior.
 
 ## Pull requests
+
+The canonical GitHub `main` branch is protected. Changes must arrive through a
+pull request and pass the required `CI/Verify` status check against the current
+target-branch state. Direct pushes, force pushes, and branch deletion are
+restricted by repository rules.
+
+The complete operational workflow is documented in
+[`docs/maintenance.md`](docs/maintenance.md).
 
 A pull request should include:
 
@@ -493,9 +539,10 @@ Avoid phrases such as:
 
 ## Licensing of contributions
 
-By submitting a contribution, you agree that it may be distributed under the repository’s license.
+The project is licensed under the Apache License 2.0.
 
-The project license remains to be selected before the first public release. This section must be updated once that decision is accepted.
+By submitting a contribution, you agree that it may be distributed under the
+same license. See [`LICENSE`](LICENSE).
 
 ## Before submitting
 
@@ -505,6 +552,9 @@ Before committing or opening a pull request:
 git status --short
 git diff --check
 git diff --cached --check
+
+make check \
+    BUSYBOX=/path/to/compatible/busybox
 ```
 
 Also verify that no credential material or local authentication state has been added:
