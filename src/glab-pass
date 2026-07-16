@@ -185,7 +185,7 @@ terminate_child_for_signal() {
 }
 
 # Invoked indirectly by the HUP, INT, and TERM traps installed below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 record_signal() {
     signal_name=$1
     derived_status=$2
@@ -285,10 +285,9 @@ require_command glab
 require_command mktemp
 require_command sha256sum
 
-[ -d /tmp ] &&
-    [ -w /tmp ] &&
-    [ -x /tmp ] ||
+if [ ! -d /tmp ] || [ ! -w /tmp ] || [ ! -x /tmp ]; then
     die '/tmp is not a usable runtime parent'
+fi
 
 # Install handlers before creating runtime credential state.
 trap 'record_signal HUP 129' HUP
