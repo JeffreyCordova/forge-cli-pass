@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 
 # gh-pass
 #
@@ -32,28 +33,28 @@ enforce_auth_policy() {
     [ "$#" -gt 0 ] || return 0
 
     case $1 in
-        -h | --help)
-            return 0
-            ;;
+    -h | --help)
+        return 0
+        ;;
 
-        status)
-            shift
+    status)
+        shift
 
-            for argument do
-                case $argument in
-                    -t | --show-token)
-                        die \
-                            'credential disclosure is outside the wrapper compatibility contract'
-                        ;;
-                esac
-            done
+        for argument; do
+            case $argument in
+            -t | --show-token)
+                die \
+                    'credential disclosure is outside the wrapper compatibility contract'
+                ;;
+            esac
+        done
 
-            return 0
-            ;;
+        return 0
+        ;;
 
-        *)
-            die "unsupported credential-management command: auth $1"
-            ;;
+    *)
+        die "unsupported credential-management command: auth $1"
+        ;;
     esac
 }
 
@@ -72,15 +73,15 @@ resolve_pass_entry() {
     carriage_return=$(printf '\r')
 
     case $pass_entry in
-        *"$newline"*)
-            die "$override_name contains a newline"
-            ;;
+    *"$newline"*)
+        die "$override_name contains a newline"
+        ;;
     esac
 
     case $pass_entry in
-        *"$carriage_return"*)
-            die "$override_name contains a carriage return"
-            ;;
+    *"$carriage_return"*)
+        die "$override_name contains a carriage return"
+        ;;
     esac
 }
 

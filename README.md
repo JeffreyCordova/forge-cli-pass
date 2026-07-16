@@ -356,6 +356,16 @@ The current verification suite contains:
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
+
+The SPDX license identifier is:
+
+```text
+Apache-2.0
+```
+
 ## Contributing
 
 Contributions should preserve the documented credential-ownership boundary, POSIX shell portability, argument fidelity, and failure semantics.

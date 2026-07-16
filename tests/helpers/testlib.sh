@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 
 TEST_TOTAL=0
 TEST_FAILED=0
