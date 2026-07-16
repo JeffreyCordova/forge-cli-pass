@@ -1,664 +1,1674 @@
 
 # Architecture
 
-**Status:** Draft
+## Purpose
 
-This document describes the current architecture of `forge-cli-pass`.
+This document describes the integrated current architecture of
+`forge-cli-pass`.
 
-Accepted architectural properties are stated normatively. Unresolved questions are identified explicitly and must not be treated as settled implementation requirements.
-
-## 1. Scope
-
-`forge-cli-pass` provides two provider-specific credential lifecycle wrappers:
-
-* `gh-pass`, wrapping GitHub CLI (`gh`)
-* `glab-pass`, wrapping GitLab CLI (`glab`)
-
-The wrappers adapt parent CLI credential handling to a `pass`-backed durable storage policy.
-
-The project does not mediate Git transport. SSH keys, Git remote configuration, host trust, and repository transport remain outside its scope.
-
-## 2. Architectural identity
+The project provides two provider-specific commands:
 
 ```text
-Repository:  forge-cli-pass
-
-Commands:    gh-pass
-             glab-pass
-
-Backend:     pass
-
-Parents:     gh
-             glab
+gh-pass
+glab-pass
 ```
 
-The wrappers remain separate because their parent CLIs expose materially different credential-consumption and credential-mutation models.
-
-## 3. Architectural drivers
-
-The architecture is shaped by the following requirements:
-
-1. Durable wrapper-managed credentials must remain encrypted in `pass`.
-2. Git transport must continue to use its independently configured SSH authentication.
-3. Parent CLI behavior should be preserved rather than reimplemented.
-4. Wrapper-managed authentication state must not remain in the parent CLI’s default config location.
-5. Decrypted material must exist only for an active invocation.
-6. GitLab OAuth refresh state must be preserved when legitimately changed.
-7. Cleanup and failure behavior must be explicit and testable.
-8. The implementation must remain proportionate and directly auditable.
-9. Dependencies and portability limits must be declared honestly.
-10. Security claims must be bounded to wrapper-controlled state.
-
-## 4. System context
+They are command-compatible wrappers for ordinary authenticated operations
+performed by:
 
 ```text
-                       ┌─────────────────────┐
-                       │        pass         │
-                       │ GPG-encrypted state │
-                       └─────────┬───────────┘
-                                 │
-                    decrypt only for invocation
-                                 │
-                 ┌───────────────┴────────────────┐
-                 │                                │
-        ┌────────▼────────┐              ┌────────▼─────────┐
-        │     gh-pass     │              │    glab-pass     │
-        │ token injection│              │ config staging   │
-        └────────┬────────┘              └────────┬─────────┘
-                 │                                │
-             GH_TOKEN                    GLAB_CONFIG_DIR
-                 │                                │
-        ┌────────▼────────┐              ┌────────▼─────────┐
-        │       gh        │              │       glab       │
-        └────────┬────────┘              └────────┬─────────┘
-                 │                                │
-        ┌────────▼────────┐              ┌────────▼─────────┐
-        │   GitHub API    │              │   GitLab API     │
-        └─────────────────┘              └──────────────────┘
+gh
+glab
 ```
 
-Git transport follows a separate path:
+The wrappers retrieve durable credential state from `pass`, introduce it only
+for the active parent CLI invocation, and avoid retaining wrapper-managed
+authentication state in the parent CLIs' default configuration locations.
+
+This document explains the resulting system as a whole.
+
+The accepted architecture decision records remain authoritative for the
+rationale behind individual decisions.
+
+## Document authority
+
+Project documentation has the following authority order:
+
+1. accepted architecture decision records
+2. this integrated architecture document
+3. `docs/project-context.md`
+4. user-facing documentation such as `README.md`
+5. implementation and tests as evidence of conformance
+
+Accepted ADRs define the governing architectural decisions.
+
+This document must remain consistent with those decisions. When an accepted ADR
+and this document conflict, the ADR governs until the conflict is corrected.
+
+Implementation and tests must conform to the accepted architecture. Existing
+code does not override an accepted decision merely because it predates that
+decision.
+
+## Accepted decision set
+
+The current architecture incorporates:
+
+| ADR | Decision |
+|---|---|
+| 0001 | Use provider-specific commands |
+| 0002 | Adopt the `forge-cli-pass`, `gh-pass`, and `glab-pass` identity |
+| 0003 | Treat `pass` as the authoritative durable credential store |
+| 0004 | Use POSIX shell with an initial Linux support contract |
+| 0005 | Define GitLab runtime staging and ordinary writeback |
+| 0006 | Define failure and exit-status semantics |
+| 0007 | Conditionally persist GitLab state after handled signals |
+| 0008 | Restrict credential-management commands |
+| 0009 | Use default `pass` entries with environment overrides |
+| 0010 | Use copy-based Make installation and tagged source releases |
+
+## System summary
+
+`forge-cli-pass` separates Git transport authentication from forge API
+authentication.
+
+The intended operating model is:
 
 ```text
-Git
-└── SSH
-    ├── GitHub
-    └── GitLab
+Git transport
+    SSH
+
+Forge CLI and API authentication
+    scoped access or OAuth credentials
+
+Authoritative durable credential state
+    GPG-encrypted pass entries
+
+Runtime credential delivery
+    per-command environment injection or temporary staging
+
+Persistent wrapper-managed parent CLI login state
+    not retained
 ```
 
-The wrappers do not provide, modify, or validate this SSH configuration.
+The two wrappers use different runtime mechanisms because the parent CLIs have
+different credential-state requirements.
 
-## 5. Components
+### GitHub
 
-### 5.1 `gh-pass`
+`gh-pass` retrieves a token from `pass` and supplies it to `gh` through
+`GH_TOKEN` for the parent process.
 
-`gh-pass` is a command-compatible wrapper around `gh` for ordinary authenticated operations.
+No wrapper-managed GitHub CLI config file is required.
 
-Responsibilities:
+### GitLab
 
-* locate the configured GitHub credential entry in `pass`
-* retrieve the credential
-* extract the expected token value
-* reject missing or empty credential data
-* provide the token to the child `gh` process through `GH_TOKEN`
-* forward arguments without reinterpretation
-* preserve the parent command’s relevant exit behavior
-* avoid writing wrapper-managed GitHub authentication state to a persistent CLI config location
+`glab-pass` retrieves a complete GitLab CLI authentication-state payload from
+`pass`, stages it as `config.yml` in a private directory beneath `/tmp`, and
+runs `glab` with `GLAB_CONFIG_DIR` directed to that directory.
 
-Non-responsibilities:
+Because GitLab authentication state may change during execution, `glab-pass`
+detects mutations and conditionally writes changed state back to `pass` before
+removing the runtime directory.
 
-* token creation
-* token scope selection
-* token validation beyond obvious local checks
-* token rotation
-* GitHub authorization-policy management
-* Git transport authentication
-* interpretation of normal `gh` subcommands
+## Goals
 
-### 5.2 `glab-pass`
+The architecture is intended to:
 
-`glab-pass` is a command-compatible wrapper around `glab` for ordinary authenticated operations.
+- keep durable wrapper-managed forge API credential state in `pass`
+- avoid routine persistent authentication state in parent CLI default config
+  locations
+- support ordinary authenticated `gh` and `glab` operations
+- preserve parent CLI argument boundaries
+- preserve parent exit statuses when wrapper obligations succeed
+- make wrapper lifecycle failures visible
+- minimize persistent plaintext credential residue
+- keep credential-handling code small enough for direct review
+- support static analysis and isolated behavioral testing
+- support Linux systems without requiring zsh
+- provide deterministic credential selection
+- provide a conventional installation interface
+- fail closed for unreviewed credential-management behavior
 
-Responsibilities:
+## Non-goals
 
-* locate the configured GitLab credential-state entry in `pass`
-* retrieve the stored GitLab CLI configuration
-* create a private temporary runtime directory
-* restore the configuration into that directory
-* run `glab` with `GLAB_CONFIG_DIR` scoped to that runtime directory
-* detect relevant configuration changes
-* write changed state back to `pass` according to the accepted writeback policy
-* remove wrapper-controlled plaintext runtime configuration
-* preserve the parent command’s relevant exit behavior
-* avoid retaining wrapper-managed GitLab authentication state in the default CLI configuration location
+The project does not:
 
-Non-responsibilities:
+- replace `pass` or GPG
+- provide a new credential vault
+- provide process isolation
+- protect credentials from the invoking user
+- protect against a compromised local account
+- protect against a compromised parent CLI
+- manage Git SSH keys
+- manage HTTPS Git credentials
+- manage Git remotes
+- manage `known_hosts`
+- manage commit or tag signing keys
+- create forge accounts
+- create access tokens
+- revoke server-side credentials
+- implement OAuth
+- parse GitLab OAuth fields
+- reproduce the complete `gh` or `glab` command parser
+- prevent direct invocation of `gh` or `glab`
+- configure Git or Docker credential helpers
+- provide multi-user policy enforcement
+- guarantee forensic erasure
+- initially support non-Linux operating systems
+- initially provide native distribution packages
+- automatically update itself
 
-* parsing or independently implementing the GitLab OAuth protocol
-* issuing or rotating OAuth credentials
-* validating GitLab configuration semantics
-* managing Git transport
-* interpreting normal `glab` subcommands
+## Terminology
 
-### 5.3 `pass`
+### Forge
 
-`pass` is the authoritative durable store for wrapper-managed forge API credential state.
+A source-code collaboration platform such as GitHub or GitLab.
 
-The architecture does not provide alternate credential backends or automatic fallback to:
+The initial implementation supports only GitHub and GitLab.
 
-* desktop keyrings
-* operating-system credential services
-* cloud secret managers
-* plaintext config files
-* environment files
+### Parent CLI
 
-Supporting multiple backends would materially change the product boundary and requires a separate architecture decision.
+The underlying provider CLI executed by a wrapper:
 
-### 5.4 Parent CLIs
+| Wrapper | Parent CLI |
+|---|---|
+| `gh-pass` | `gh` |
+| `glab-pass` | `glab` |
 
-`gh` and `glab` remain responsible for:
+### Forge API credential
 
-* API request construction
-* command parsing
-* command output
-* platform-specific API behavior
-* server communication
-* normal command exit conditions
-* extension behavior
-* authentication-state mutation performed internally by the parent CLI
+Credential state used by a parent CLI to authenticate API-oriented operations.
 
-The wrappers trust the installed parent CLI binaries within the documented threat model.
+This is separate from Git transport authentication.
 
-## 6. State model
+### Credential material
 
-### 6.1 Durable state
+A token, refresh token, OAuth configuration, or other data that can participate
+in authentication.
 
-Durable wrapper-managed credential state is state intended to survive between invocations.
+### Authentication state
 
-It belongs only in `pass`.
+The complete state required by a parent CLI to continue an authenticated
+session.
 
-Examples:
+For GitLab, this may be broader than one standalone token.
 
-* GitHub API token
-* GitLab CLI OAuth configuration, including refresh-capable state
+### Durable credential state
 
-### 6.2 Runtime state
+The authoritative encrypted credential representation stored in `pass`.
 
-Runtime credential material is the decrypted form introduced for one invocation.
+### Runtime credential material
 
-Examples:
+Credential material made available only for an active wrapper invocation.
 
-* a GitHub token held in wrapper memory and provided through `GH_TOKEN`
-* a temporary GitLab `config.yml`
-* temporary content fingerprints or metadata used for change detection
+### Credential injection
 
-### 6.3 Parent-managed non-credential state
+Supplying credential material to a parent process through its environment.
 
-The project may allow parent CLI preferences that are not part of wrapper-managed authentication state, but the boundary must be explicitly defined.
+`gh-pass` uses credential injection through `GH_TOKEN`.
 
-The architecture must not assume that every parent CLI configuration value is sensitive or that every default config file is prohibited.
+### Credential staging
 
-The governing concern is persistent wrapper-managed authentication state.
+Materializing credential state temporarily in a private filesystem location.
 
-### 6.4 External state
+`glab-pass` uses credential staging through `GLAB_CONFIG_DIR`.
 
-The following state is outside the wrapper-controlled lifecycle:
+### Writeback
 
-* SSH private keys
-* SSH agents
-* Git credential helpers
-* Git remote URLs
-* `known_hosts`
-* GPG keys
-* the password-store repository
-* kernel memory
-* swap
-* filesystem journals
-* terminal output
-* logs created by other components
-* state copied internally by a trusted parent CLI
+Persisting changed staged GitLab authentication state to the authoritative
+`pass` entry.
 
-## 7. GitHub credential flow
+### Persistent credential residue
+
+Credential material or reusable authentication state remaining after the
+wrapper invocation has completed.
+
+### Wrapper-managed credential state
+
+Credential state whose lifecycle is controlled by `gh-pass` or `glab-pass`.
+
+This excludes unrelated operator-managed parent CLI state created through direct
+use of `gh` or `glab`.
+
+## Architectural invariants
+
+### 1. `pass` is authoritative
+
+The selected `pass` entry is the only durable credential source used by a
+wrapper invocation.
+
+The wrappers do not fall back to:
+
+- native parent CLI authentication state
+- an operating-system keyring
+- a desktop credential service
+- another pass entry
+- a plaintext credential file
+- interactive login
+- automatic account discovery
+
+### 2. Credential provenance is deterministic
+
+Each invocation uses exactly one selected `pass` entry.
+
+That entry results from either:
+
+- the documented built-in default
+- one explicit environment-variable override
+
+Failure to access the selected entry does not trigger another credential lookup.
+
+### 3. Runtime exposure is bounded
+
+Credential material is introduced only through the mechanism required by the
+selected parent CLI:
 
 ```text
-┌──────────────────────────────┐
-│ pass entry: GitHub token     │
-│ durable and GPG-encrypted    │
-└──────────────┬───────────────┘
-               │ decrypt
-               ▼
-┌──────────────────────────────┐
-│ gh-pass                      │
-│ validate non-empty token     │
-└──────────────┬───────────────┘
-               │ GH_TOKEN
-               ▼
-┌──────────────────────────────┐
-│ gh process                   │
-│ receives original arguments  │
-└──────────────┬───────────────┘
-               │
-               ▼
-        GitHub API operation
+GitHub token
+    GH_TOKEN in the gh process environment
+
+GitLab authentication state
+    config.yml beneath a private temporary GLAB_CONFIG_DIR
 ```
 
-Required properties:
+The wrappers do not intentionally copy credentials into other runtime
+locations.
 
-1. The token is obtained from `pass` only when `gh-pass` is invoked.
-2. The token is not placed in a persistent wrapper-managed config file.
-3. The token is provided only to the intended parent process and its descendants.
-4. Wrapper diagnostics must not print the token.
-5. Arguments must be forwarded without unintended expansion or reinterpretation.
-6. The wrapper must not claim that the token is absent from process memory or all operating-system observation surfaces.
-7. Normal GitHub CLI configuration outside the wrapper-managed credential boundary must not be modified unnecessarily.
+### 4. Parent CLI default authentication state is not authoritative
 
-## 8. GitLab credential flow
+The wrappers do not intentionally create or rely on wrapper-managed
+authentication state in the parent CLIs' normal persistent configuration
+locations.
+
+Direct operator use of an unwrapped parent CLI remains outside this invariant.
+
+### 5. GitLab mutation is preserved when safe enough to do so
+
+After ordinary parent completion, changed, structurally valid GitLab
+authentication state is written back to `pass`, including after a nonzero
+parent status.
+
+After handled signal termination, changed state is written back only when the
+parent has terminated and the staged file remains eligible under the
+signal-time structural checks.
+
+### 6. Plaintext GitLab state is cleaned up
+
+`glab-pass` attempts to remove its complete private runtime directory after
+every path on which runtime state was created.
+
+Cleanup failure is a material wrapper failure during ordinary completion.
+
+After handled signal termination, cleanup failure is reported while the
+signal-derived status remains final.
+
+### 7. Credential-management behavior fails closed
+
+Within the parent `auth` namespace, only explicitly supported status and help
+operations are allowed.
+
+Unknown or credential-mutating `auth` operations are rejected before parent
+execution.
+
+### 8. Parent behavior is preserved within the compatibility boundary
+
+For supported operations, wrapper arguments retain their order and boundaries
+and are delegated to the parent CLI.
+
+The wrapper does not reconstruct the parent command as a shell string.
+
+### 9. Wrapper failures remain visible
+
+The parent status is preserved only when all required wrapper lifecycle
+operations succeed.
+
+A wrapper lifecycle failure during ordinary execution returns status `1`.
+
+## System context
+
+### GitHub path
 
 ```text
-┌──────────────────────────────────┐
-│ pass entry: GitLab CLI config    │
-│ durable and GPG-encrypted        │
-└────────────────┬─────────────────┘
-                 │ decrypt
-                 ▼
-┌──────────────────────────────────┐
-│ private temporary directory      │
-│ temporary config.yml             │
-└────────────────┬─────────────────┘
-                 │ GLAB_CONFIG_DIR
-                 ▼
-┌──────────────────────────────────┐
-│ glab process                     │
-│ may read and mutate config       │
-└────────────────┬─────────────────┘
-                 │
-                 ▼
-        compare runtime state
-          │                 │
-     unchanged            changed
-          │                 │
-          │                 ▼
-          │        write updated state
-          │             to pass
-          │                 │
-          └────────┬────────┘
-                   ▼
-       remove temporary directory
+Operator
+   |
+   | gh-pass <arguments>
+   v
+gh-pass
+   |
+   | pass show <selected GitHub entry>
+   v
+pass and GPG
+   |
+   | first-line token
+   v
+gh-pass
+   |
+   | GH_TOKEN=<token> exec gh <arguments>
+   v
+GitHub CLI
+   |
+   | authenticated API operations
+   v
+GitHub
 ```
 
-Required properties:
+### GitLab path
 
-1. The stored configuration is restored only for an active invocation.
-2. The temporary directory must be created without a predictable-name race.
-3. The runtime directory and credential file must have restrictive permissions.
-4. `glab` must be directed to the temporary configuration rather than the default configuration location.
-5. Changed credential state must be written back only through the defined writeback path.
-6. Unchanged state should not cause unnecessary writeback.
-7. Cleanup must be attempted after success, parent-command failure, and handled termination signals.
-8. Cleanup failure must be reported without concealing the parent command’s outcome.
-9. The project must not claim forensic erasure after file deletion.
-10. The exact writeback policy after a nonzero `glab` exit remains an open architecture decision.
+```text
+Operator
+   |
+   | glab-pass <arguments>
+   v
+glab-pass
+   |
+   | pass show <selected GitLab entry>
+   v
+pass and GPG
+   |
+   | complete opaque config.yml payload
+   v
+private /tmp/glab-pass.XXXXXX directory
+   |
+   | GLAB_CONFIG_DIR=<runtime directory>
+   v
+GitLab CLI
+   |
+   | authenticated API operations and possible state mutation
+   v
+GitLab
 
-## 9. Trust boundaries
+After parent completion:
+   staged config validation
+        |
+        +-- unchanged --> cleanup
+        |
+        +-- changed ----> pass writeback --> cleanup
+```
 
-### 9.1 Trusted components
+## Components
 
-The current model assumes the following are trustworthy enough for local operation:
+## `gh-pass`
 
-* the local user account
-* the selected shell runtime
-* `pass`
-* GPG and the relevant private key
-* the local password store
-* `gh`
-* `glab`
-* required filesystem and utility commands
-* the operating-system kernel
-* the repository checkout or installed release
-* the environment from which the wrapper is invoked
+`gh-pass` is a POSIX shell wrapper for GitHub CLI.
 
-Trust does not mean these components are proven secure. It means compromise of these components is outside the protection boundary of the project.
+Its responsibilities are:
 
-### 9.2 Untrusted or uncontrolled inputs
+- normalize security-relevant shell state
+- enforce the credential-management command policy
+- resolve the GitHub pass-entry name
+- validate required non-baseline dependencies
+- retrieve the selected pass entry
+- extract the first line as the GitHub token
+- reject missing or empty token material
+- scope the token to the parent process through `GH_TOKEN`
+- replace itself with `gh`
+- preserve parent arguments exactly
 
-The wrappers must treat the following as potentially invalid:
+It does not perform post-command writeback or filesystem cleanup.
 
-* command-line arguments
-* unset or malformed environment variables
-* missing credential entries
-* empty credential material
-* malformed stored GitLab configuration
-* unavailable dependencies
-* unsuitable runtime directories
-* conflicting filesystem paths
-* failed writes to `pass`
-* parent CLI failures
-* unexpected parent CLI mutation of runtime configuration
-
-### 9.3 External services
-
-GitHub and GitLab are outside the local enforcement boundary.
-
-The project does not control:
-
-* server-side credential handling
-* API authorization policy
-* account compromise
-* remote logging
-* token revocation behavior
-* server availability
-* API compatibility
-
-## 10. Security objectives and invariants
-
-### 10.1 Primary objective
-
-> Minimize the duration, scope, and persistence of decrypted forge API credential material under wrapper control.
-
-### 10.2 Durable-state invariant
-
-> Durable wrapper-managed forge API credential state is stored only in `pass`.
-
-### 10.3 Runtime-state invariant
-
-> Decrypted wrapper-managed credential material is introduced only during an active invocation of the corresponding parent CLI.
-
-### 10.4 Cleanup invariant
-
-> Wrapper-controlled plaintext credential files are not intentionally retained after the invocation ends.
-
-### 10.5 Parent-interface invariant
-
-> For supported ordinary operations, arguments are passed to the parent CLI without semantic reinterpretation.
-
-### 10.6 Non-interference invariant
-
-> The wrappers do not modify Git transport authentication or unrelated parent CLI state as part of normal credential delivery.
-
-## 11. Compatibility contract
-
-The wrappers are command-compatible with their parent CLIs for ordinary authenticated operations.
-
-Examples include:
+After successful validation, its final invocation is equivalent to:
 
 ```sh
-gh-pass repo view
-gh-pass pr list
-gh-pass api user
-
-glab-pass repo view
-glab-pass mr list
-glab-pass pipeline list
+GH_TOKEN=$token exec gh "$@"
 ```
 
-Command compatibility means:
+Process replacement means that normal output, signals, and exit status are then
+owned directly by `gh`.
 
-* the wrapper command is substituted for the parent command
-* remaining arguments retain their order and boundaries
-* the parent CLI performs command parsing
-* the parent CLI controls ordinary output
-* the wrapper does not reimplement parent subcommands
+## `glab-pass`
 
-The initial compatibility contract does not automatically include credential-management operations such as:
+`glab-pass` is a POSIX shell wrapper for GitLab CLI.
+
+Its responsibilities are:
+
+- normalize security-relevant shell state
+- enforce the credential-management command policy
+- resolve the GitLab pass-entry name
+- validate required non-baseline dependencies
+- create and protect a private runtime directory
+- restore the complete opaque GitLab configuration
+- establish required file permissions
+- fingerprint the initial state
+- invoke `glab` with a private `GLAB_CONFIG_DIR`
+- record the parent status
+- coordinate handled signals with the child process
+- validate post-command staged state
+- detect changes
+- perform required ordinary or signal-time writeback
+- remove temporary plaintext state
+- calculate the final status
+- report material lifecycle failures
+
+Because post-command processing is required, `glab-pass` cannot normally replace
+itself with `glab`.
+
+## Credential-entry configuration
+
+### GitHub
+
+Default entry:
+
+```text
+forge-cli-pass/github/token
+```
+
+Override variable:
+
+```text
+FORGE_CLI_PASS_GITHUB_ENTRY
+```
+
+### GitLab
+
+Default entry:
+
+```text
+forge-cli-pass/gitlab/oauth-config
+```
+
+Override variable:
+
+```text
+FORGE_CLI_PASS_GITLAB_ENTRY
+```
+
+### Resolution rules
+
+For each wrapper:
+
+```text
+override unset
+    use built-in default
+
+override set and non-empty
+    use override
+
+override set but empty
+    wrapper failure
+
+override contains newline or carriage return
+    wrapper failure
+```
+
+The selected value is passed to `pass` as one quoted argument.
+
+The wrappers do not:
+
+- accept an entry-selection command-line option
+- parse a project configuration file
+- search the password store
+- infer an entry from a Git remote
+- infer an account from a hostname
+- remember a previous selection
+- fall back after selection failure
+
+### Interaction with `pass`
+
+Configuration owned by `pass` remains active.
+
+For example, the wrapper does not replace or reinterpret:
+
+```text
+PASSWORD_STORE_DIR
+PASSWORD_STORE_GPG_OPTS
+```
+
+The wrapper controls only the entry name it requests.
+
+## GitHub credential representation
+
+The GitHub pass entry contains the token on its first line.
+
+Example structure:
+
+```text
+<GitHub token>
+optional operator notes
+optional metadata
+```
+
+Only the first line is credential input to `gh-pass`.
+
+Later lines are ignored by the wrapper.
+
+The wrapper must reject an empty first line even when later lines contain data.
+
+The token is not:
+
+- written to a file by `gh-pass`
+- printed by the wrapper
+- exported persistently by the wrapper
+- inserted into a reconstructed command string
+- retained after successful process replacement beyond the lifetime of `gh`
+
+The token necessarily exists in process memory and in the environment supplied
+to the `gh` process.
+
+## GitLab credential representation
+
+The GitLab pass entry contains the complete GitLab CLI authentication-state
+payload expected as:
+
+```text
+config.yml
+```
+
+The payload is opaque to `glab-pass`.
+
+The wrapper does not:
+
+- parse YAML fields
+- identify individual access or refresh tokens
+- validate OAuth semantics
+- merge selected fields
+- implement token refresh
+- reconstruct the configuration
+- classify individual parent mutations
+
+The complete payload is restored and, when required, written back as one unit.
+
+## GitHub execution lifecycle
+
+The intended `gh-pass` lifecycle is:
+
+1. disable inherited command tracing
+2. establish `umask 077`
+3. classify the requested operation under the credential-management policy
+4. reject unsupported `auth` operations
+5. resolve and validate the selected pass entry
+6. validate `pass` and `gh`
+7. retrieve the selected entry
+8. extract the first line
+9. reject an empty token
+10. invoke `gh` through process replacement with `GH_TOKEN`
+11. allow `gh` to own normal output, signals, and final status
+
+Credential-policy rejection should occur before credential retrieval when the
+command can be classified safely at that stage.
+
+## GitLab ordinary execution lifecycle
+
+The intended ordinary `glab-pass` lifecycle is:
+
+1. disable inherited command tracing
+2. establish `umask 077`
+3. classify the requested operation under the credential-management policy
+4. reject unsupported `auth` operations
+5. resolve and validate the selected pass entry
+6. validate `pass`, `glab`, `mktemp`, and `sha256sum`
+7. verify that `/tmp` is a usable staging parent
+8. create a private runtime directory beneath `/tmp`
+9. apply directory mode `0700`
+10. restore the pass entry as `config.yml`
+11. apply config-file mode `0600`
+12. validate the initial staged file
+13. compute the initial content fingerprint
+14. invoke `glab` with `GLAB_CONFIG_DIR` scoped to the runtime directory
+15. record the exact parent status immediately
+16. validate the post-command staged config
+17. compute the post-command fingerprint
+18. write changed state back to `pass` when required
+19. attempt complete runtime-directory cleanup
+20. determine the final status under the failure model
+21. report every material wrapper failure
+
+### Runtime staging location
+
+The runtime directory is always created beneath:
+
+```text
+/tmp
+```
+
+The accepted creation form is:
 
 ```sh
-gh-pass auth login
-gh-pass auth logout
-gh-pass auth token
-
-glab-pass auth login
-glab-pass auth logout
+mktemp -d /tmp/glab-pass.XXXXXX
 ```
 
-These operations may expose, replace, invalidate, or mutate stored credential state. Their support policy must be defined explicitly.
+The wrapper does not use:
 
-## 12. Failure behavior
+```text
+XDG_RUNTIME_DIR
+HOME
+the current working directory
+a repository-local directory
+the parent CLI default config directory
+```
 
-The wrappers should follow these failure principles:
+The wrapper uses a fixed shared parent and a private unpredictable child
+directory.
 
-1. Reject missing dependencies before handling credential material where practical.
-2. Reject missing or empty credentials.
-3. Do not silently fall back to a different credential store.
-4. Do not silently use persistent parent CLI authentication state.
-5. Do not print credential material in diagnostics.
-6. Report cleanup and writeback failures clearly.
-7. Preserve the parent CLI exit status unless a more serious wrapper failure prevents correct completion.
-8. Avoid implicit behavior dependent on an interactive shell configuration.
-9. Avoid broad error-handling constructs whose behavior is difficult to reason about.
-10. Make partial persistent mutation visible.
+### Runtime permissions
 
-The exact precedence between parent-command failure, writeback failure, and cleanup failure must be defined and tested.
+Required permissions are:
 
-## 13. Configuration model
+```text
+runtime directory    0700
+config.yml           0600
+```
 
-The prototype uses fixed `pass` entry names.
+`umask 077` is established before runtime credential material is created.
 
-The public configuration model remains unresolved.
+The wrapper also applies the required permissions defensively.
 
-Candidate approaches include:
+Failure to establish the required permissions prevents normal parent execution
+or becomes a wrapper lifecycle failure, depending on when it occurs.
 
-* fixed documented conventions
-* environment-variable overrides with documented defaults
-* command-line options
-* a configuration file
-* a combination with explicit precedence
+### Initial staged-state requirements
 
-Any configuration mechanism must define:
+Before `glab` is invoked, the config must:
 
-* accepted values
-* precedence
-* validation
-* whether configuration values may contain credential material
-* file-permission expectations
-* diagnostic behavior
-* interaction with parent CLI environment variables
+- exist
+- be a regular file
+- be readable by the invoking user
+- be non-empty
+- be fingerprintable
 
-A configuration file must not be introduced merely for extensibility. Its complexity must be justified by concrete operator requirements.
+Failure prevents parent execution.
 
-## 14. Runtime language and platform support
+### Parent invocation
 
-The runtime language and support contract remain unresolved.
+The parent process receives:
 
-The current architectural requirements are:
+```text
+GLAB_CONFIG_DIR=<private runtime directory>
+```
 
-* the language must support safe argument forwarding
-* cleanup and signal behavior must be testable
-* dependency lookup must be deterministic
-* the implementation must not depend on interactive shell configuration
-* static and behavioral verification should be available
-* the supported platform claim must distinguish shell-language portability from external utility portability
+The environment assignment is scoped to the `glab` invocation.
 
-Candidate decisions include:
+All supported parent arguments are forwarded in their original order and
+boundaries through:
 
-* zsh on Linux
-* Bash on Linux
-* POSIX shell language with Linux support
-* broader cross-Unix POSIX shell support
+```sh
+glab "$@"
+```
 
-No portability claim should be made until the selected shell and external dependency matrix are tested.
+or an equivalent non-evaluating invocation.
 
-## 15. Change detection and writeback
+### Change detection
 
-`glab-pass` must determine whether the staged GitLab configuration changed.
+The wrapper computes a SHA-256 content fingerprint before and after ordinary
+parent completion.
 
-The architectural requirement is:
+The fingerprint answers only:
 
-> Avoid unnecessary writes to `pass` while reliably persisting legitimate mutable authentication state.
+```text
+Did the staged file content change?
+```
 
-Possible mechanisms include:
+It does not establish:
 
-* content fingerprint comparison
-* exact byte comparison against a second temporary copy
-* another explicit mutation signal, if supported by the parent CLI
+- authenticity
+- trusted integrity
+- semantic validity
+- provenance
+- successful OAuth refresh
+- legitimacy of the mutation
 
-The mechanism must be evaluated for:
+### Unchanged state
 
-* correctness
-* dependency cost
-* transient plaintext exposure
-* portability
-* auditability
-* behavior under parent CLI failure
+When the post-command fingerprint matches the initial fingerprint:
 
-The current use of SHA-256 is an implementation mechanism for change detection, not an integrity or authentication guarantee.
+- no pass writeback occurs
+- the prior durable entry remains unchanged
+- cleanup remains required
 
-## 16. Installation and distribution boundary
+### Changed state
 
-The public installation model remains unresolved.
+When the staged file remains valid and its fingerprint changed:
 
-Candidate models include:
+- the complete file is written back to the selected pass entry
+- writeback occurs after parent success
+- writeback also occurs after ordinary nonzero parent completion
+- cleanup is attempted after writeback
 
-* copy-based installation through a `Makefile`
-* package-manager installation
-* release archives
-* development-only symlink installation
-* a dedicated installer invoked through a conventional task interface
+The writeback operation is equivalent to:
 
-The default public installation model should not make installed behavior change implicitly when a development checkout changes, unless that behavior is explicitly selected by the operator.
+```sh
+pass insert --force --multiline "$pass_entry" <"$config_file"
+```
 
-The installation design must define:
+The implementation must not expose the payload through command arguments or
+diagnostics.
 
-* installation prefix
-* uninstallation behavior
-* executable permissions
-* conflict handling
-* development workflow
-* release-artifact relationship
-* packaging compatibility
-* whether man pages or completion files are installed
+### Invalid post-command state
 
-## 17. Observability and diagnostics
+After ordinary parent completion, the staged config must still:
 
-Diagnostics should:
+- exist
+- be a regular file
+- be readable
+- be non-empty
+- be fingerprintable
 
-* identify the wrapper producing the message
-* describe actionable local failures
-* avoid printing credential values
-* distinguish parent CLI failures from wrapper failures
-* report cleanup or writeback problems
-* avoid claiming cleanup guarantees beyond wrapper control
+Invalid state is not written back.
 
-Normal parent CLI output should pass through without unnecessary wrapper decoration.
+Invalid state is a wrapper lifecycle failure regardless of the parent status.
 
-A future diagnostic command may be considered, but no unified command or shared runtime framework should be introduced solely to provide one.
+Cleanup is still attempted.
 
-## 18. Verification requirements
+## Signal-driven GitLab lifecycle
 
-The implementation must be verified through isolated tests that do not use real credentials or network access.
+`glab-pass` explicitly handles:
 
-### `gh-pass`
+```text
+HUP
+INT
+TERM
+```
+
+The wrapper must ensure that the child `glab` process is not left running
+unintentionally.
+
+After receiving a handled signal, it must:
+
+1. record the signal
+2. forward or otherwise deliver appropriate termination to the child
+3. wait until the child has terminated
+4. avoid inspecting or deleting staged state while the child may still mutate it
+5. validate the staged config
+6. conditionally attempt writeback
+7. attempt cleanup
+8. report lifecycle failures
+9. preserve the signal-derived final status
+
+### Signal-time writeback eligibility
+
+Signal-time state is eligible for writeback only when it:
+
+- exists
+- is a regular file
+- is readable
+- is non-empty
+- can be fingerprinted
+- differs from the initial fingerprint
+
+Eligible changed state is written back on a best-effort basis with explicit
+diagnostics.
+
+### Invalid signal-time state
+
+Missing, non-regular, unreadable, empty, or unfingerprintable state does not
+replace the durable pass entry.
+
+The wrapper reports that:
+
+- the prior durable entry was retained
+- GitLab reauthentication may be required
+
+Cleanup remains required.
+
+### Signal-time writeback failure
+
+Signal-time writeback failure:
+
+- is reported
+- does not prevent cleanup
+- does not replace the signal-derived status
+- may leave durable state stale when the server-side refresh state already
+  changed
+
+### Signal-time cleanup failure
+
+Signal-time cleanup failure is reported prominently because plaintext runtime
+state may remain.
+
+The signal-derived status remains final.
+
+### Signal statuses
+
+```text
+HUP   129
+INT   130
+TERM  143
+```
+
+These remain final even when validation, writeback, cleanup, or multiple
+signal-time lifecycle operations fail.
+
+Signals such as `KILL` cannot be trapped and are outside the cleanup guarantee.
+
+## Credential-management command policy
+
+The wrappers support:
+
+- ordinary authenticated operations
+- help and command discovery
+- authentication-status checks that do not display credential material
+
+Within the `auth` namespace, the wrappers use an explicit allowlist.
+
+### Allowed forms
+
+Required conventional forms include:
+
+```sh
+gh-pass auth
+gh-pass auth --help
+gh-pass auth -h
+gh-pass auth status
+gh-pass auth status --help
+gh-pass auth status -h
+
+glab-pass auth
+glab-pass auth --help
+glab-pass auth -h
+glab-pass auth status
+glab-pass auth status --help
+glab-pass auth status -h
+```
+
+Non-disclosing status options may be supported when explicitly tested.
+
+### Prohibited disclosure options
+
+Within `auth status`, the wrappers reject known credential-display options,
+including:
+
+```text
+--show-token
+-t
+```
+
+The parent CLI is not invoked for a rejected form.
+
+### Rejected GitHub operations
+
+`gh-pass` rejects at least:
+
+```text
+auth login
+auth logout
+auth refresh
+auth setup-git
+auth switch
+auth token
+```
+
+### Rejected GitLab operations
+
+`glab-pass` rejects at least:
+
+```text
+auth login
+auth logout
+auth configure-docker
+auth docker-helper
+auth dpop-gen
+```
+
+### Unknown `auth` operations
+
+Unknown future `auth` subcommands are rejected by default.
+
+Support requires deliberate review, documentation, implementation, and tests.
+
+### Parsing boundary
+
+The wrappers implement only enough argument inspection to enforce the accepted
+policy.
+
+They do not reproduce the complete parent CLI parser.
+
+The implementation must:
+
+- recognize conventional entry into the `auth` namespace
+- recognize its immediate subcommand
+- identify supported help and status forms
+- detect prohibited token-display flags
+- reject known prohibited operations
+- reject unknown `auth` operations
+- preserve ordinary non-`auth` arguments exactly
+
+Ambiguous invocations that appear to target credential management must fail
+closed rather than being forwarded merely because the wrapper could not
+classify them.
+
+Broader parent-global-option placement is supported only when explicitly
+covered by the compatibility tests.
+
+The policy is an accidental-misuse guardrail, not a security boundary. An
+operator can still invoke the parent CLI directly.
+
+## Failure model
+
+Wrapper results are divided into four classes:
+
+| Result | Final status |
+|---|---:|
+| Parent and wrapper succeed | `0` |
+| Parent fails; wrapper obligations succeed | Exact parent status |
+| Wrapper lifecycle fails during ordinary execution | `1` |
+| Handled signal terminates `glab-pass` | Signal-derived status |
+
+### Clean parent failure
+
+A parent nonzero status is preserved when every required wrapper postcondition
+succeeds.
+
+Example:
+
+```text
+glab exits 4
+staged state remains valid
+required writeback succeeds
+cleanup succeeds
+glab-pass exits 4
+```
+
+### Wrapper lifecycle failure
+
+Ordinary wrapper failures include:
+
+- invalid configuration override
+- missing non-baseline dependency
+- unreadable pass entry
+- empty credential material
+- runtime-directory creation failure
+- permission failure
+- initial fingerprint failure
+- invalid post-command config
+- required writeback failure
+- cleanup failure
+- another unsatisfied architectural postcondition
+
+Any ordinary wrapper lifecycle failure returns:
+
+```text
+1
+```
+
+and overrides the parent status.
+
+When a parent nonzero status is overridden, diagnostics must still report that
+status.
+
+### Multiple failures
+
+The wrapper does not rank lifecycle failures.
+
+It must:
+
+1. record the parent status
+2. attempt every remaining safe operation
+3. record each wrapper failure
+4. report each material failure
+5. return status `1` during ordinary execution
+
+A writeback failure must not prevent cleanup.
+
+Invalid staged state must not prevent cleanup.
+
+### Shell execution failures
+
+Statuses such as:
+
+```text
+126
+127
+```
+
+may still arise from shell-level execution failures.
+
+Expected non-baseline dependencies are validated before credential handling
+where practical, so ordinary missing-dependency failures normally return
+wrapper status `1` with an explicit diagnostic.
+
+## Diagnostic model
+
+Wrapper diagnostics are written to standard error.
+
+They must:
+
+- identify the wrapper
+- identify the failed operation
+- distinguish parent failure from wrapper failure
+- report an overridden parent status
+- report every material lifecycle failure
+- identify non-sensitive entry names or paths when useful
+- provide actionable remediation where practical
+- avoid credential disclosure
+
+Diagnostics must not include:
+
+- access-token values
+- refresh-token values
+- complete GitLab configuration
+- decrypted pass-entry content
+- reconstructed commands containing sensitive data
+- shell traces containing credentials
+
+Normal parent CLI output remains controlled by the parent CLI.
+
+## Runtime language
+
+The wrappers are implemented using POSIX shell syntax.
+
+Shebang:
+
+```sh
+#!/bin/sh
+```
+
+The supported shell implementations are:
+
+```text
+Dash
+Bash in POSIX mode
+BusyBox ash
+```
+
+The initial supported operating-system family is:
+
+```text
+Linux
+```
+
+The project does not currently claim support for:
+
+- macOS
+- FreeBSD
+- OpenBSD
+- other BSD systems
+- every POSIX-conforming system
+- every implementation of `/bin/sh`
+
+## Shell-language constraints
+
+The wrappers must not rely on:
+
+- zsh-specific parameter expansion
+- Bash arrays
+- zsh arrays
+- `[[ ... ]]`
+- process substitution
+- shell-specific regular-expression syntax
+- `eval`
+- executable command strings
+- interactive aliases
+- interactive functions
+- interactive shell startup configuration
+
+The wrappers must:
+
+- use `"$@"` for parent argument forwarding
+- quote data expansions
+- disable inherited command tracing
+- establish `umask 077`
+- preserve statuses intentionally
+- handle expected failures explicitly
+- remain syntactically valid under every supported shell
+- behave consistently under the tested shell matrix
+
+## Runtime dependency model
+
+The project distinguishes:
+
+1. POSIX shell facilities
+2. baseline Linux platform utilities
+3. validated non-baseline dependencies
+
+### Shell facilities
+
+The implementation may rely on ordinary supported shell facilities such as:
+
+```text
+command
+exec
+printf
+test / [ ]
+trap
+kill
+wait
+umask
+parameter expansion
+command substitution
+environment assignment
+```
+
+### Baseline external utilities
+
+The runtime architecture currently assumes ordinary Linux implementations of:
+
+```text
+chmod
+rm
+```
+
+These are part of the baseline supported platform contract and are not
+individually validated before every invocation.
+
+The final implementation must document any additional baseline utility it uses.
+
+The baseline must not expand silently.
+
+### `gh-pass` non-baseline dependencies
+
+```text
+pass
+gh
+```
+
+### `glab-pass` non-baseline dependencies
+
+```text
+pass
+glab
+mktemp
+sha256sum
+```
+
+Non-baseline dependencies are validated explicitly before credential handling
+where practical.
+
+## Trusted components
+
+The architecture trusts:
+
+- the invoking local user account
+- the invoking environment
+- the installed wrapper scripts
+- the selected POSIX shell
+- the Linux kernel
+- the local filesystem
+- `/tmp` filesystem semantics
+- baseline platform utilities
+- `pass`
+- GPG and the relevant private key
+- `gh`
+- `glab`
+- `mktemp`
+- `sha256sum`
+- extensions or subprocesses deliberately invoked through a parent CLI
+- the operator's password-store configuration
+
+A malicious or compromised trusted component may access or alter runtime
+credential material.
+
+Protecting against such a component is outside the project boundary.
+
+## Security posture
+
+### Risks reduced
+
+The architecture is intended to reduce:
+
+- routine retention of wrapper-managed parent CLI login state
+- accidental inclusion of parent CLI OAuth config in dotfiles
+- confusion between wrapper-managed and parent-managed credentials
+- persistent reusable GitLab runtime config after ordinary completion
+- accidental token display through supported `auth` operations
+- silent credential-source fallback
+- accidental use of an unintended discovered account
+- loss of legitimate GitLab refresh state after ordinary command failure
+- hidden writeback or cleanup failures
+- zsh as an unnecessary dedicated runtime dependency
+
+### Risks not addressed
+
+The architecture does not protect against:
+
+- a compromised local user account
+- a compromised password store
+- an exposed GPG private key
+- a malicious parent CLI
+- malicious CLI extensions
+- a compromised shell, terminal, kernel, or filesystem
+- privileged process inspection
+- process-environment inspection by an authorized actor
+- memory or swap exposure
+- filesystem journals
+- backups or snapshots
+- forensic recovery
+- shell history containing operator-entered secrets
+- secrets already present in repository files
+- direct invocation of parent CLIs
+- direct use of `pass`
+- uncatchable signals
+- power loss or kernel failure
+- remote service compromise
+- weak token scope choices
+- Git transport authentication failure
+
+### `/tmp` boundary
+
+GitLab plaintext runtime state exists beneath a shared parent directory.
+
+The credential file itself remains inside a private, unpredictably named
+wrapper-controlled child directory with restrictive permissions.
+
+The architecture relies on:
+
+- atomic private-directory creation by `mktemp`
+- appropriate local filesystem permission enforcement
+- no hostile privileged actor within the threat model
+
+### Opaque-state limitation
+
+A regular, readable, non-empty GitLab config may still be semantically invalid
+or partially mutated.
+
+Structural validation cannot prove OAuth correctness.
+
+This limitation is accepted because the wrapper does not own the GitLab config
+schema and intentionally avoids becoming a partial authentication
+implementation.
+
+## Installation architecture
+
+Canonical executable sources:
+
+```text
+src/gh-pass
+src/glab-pass
+```
+
+The installed files are direct copies of these scripts.
+
+No compilation or generated runtime artifact is required.
+
+### Public Make targets
+
+```text
+install
+uninstall
+dev-install
+dev-uninstall
+check
+```
+
+### Installation variables
+
+```make
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DESTDIR ?=
+```
+
+### Normal installation
+
+```sh
+make install
+```
+
+Normal installation:
+
+- creates the selected binary directory
+- copies both canonical scripts
+- installs them with mode `0755`
+- performs no credential operation
+- performs no authentication
+- performs no network request
+- does not modify `PATH`
+- does not modify shell startup files
+- does not invoke privilege escalation
+
+User-local example:
+
+```sh
+make install PREFIX="$HOME/.local"
+```
+
+Packaging example:
+
+```sh
+make install DESTDIR="$pkgdir" PREFIX=/usr
+```
+
+### Normal uninstall
+
+```sh
+make uninstall
+```
+
+Normal uninstall removes only:
+
+```text
+$(DESTDIR)$(BINDIR)/gh-pass
+$(DESTDIR)$(BINDIR)/glab-pass
+```
+
+It does not remove directories, credentials, parent CLI state, or unrelated
+files.
+
+### Development installation
+
+```sh
+make dev-install PREFIX="$HOME/.local"
+```
+
+Development installation creates absolute symlinks to the canonical scripts in
+the current physical checkout.
+
+It is explicitly not the stable normal installation model.
+
+Working-tree edits, branch changes, and checkout compromise affect linked
+commands immediately.
+
+### Development uninstall
+
+```sh
+make dev-uninstall PREFIX="$HOME/.local"
+```
+
+Development uninstall removes only links verified to belong to the current
+checkout.
+
+It must retain:
+
+- copied installations
+- regular files
+- directories
+- links into another checkout
+- unrelated symlinks
+
+## Distribution architecture
+
+The initial distribution unit is a source checkout or tagged source archive.
+
+A release archive must contain enough material to inspect, test, and install the
+project, including:
+
+```text
+Makefile
+src/
+tests/
+docs/
+README.md
+CONTRIBUTING.md
+LICENSE
+```
+
+When present, it should also contain:
+
+```text
+SECURITY.md
+CHANGELOG.md
+```
+
+Initial release distribution consists of:
+
+- versioned Git tags
+- GitHub as the primary public release location
+- corresponding tags mirrored to GitLab
+- source archives associated with released tags
+- installation from an unpacked source tree through `make install`
+
+The project does not initially provide:
+
+- `curl | sh`
+- another remote shell installer
+- automatic self-update
+- standalone compiled bundles
+- project-maintained native package repositories
+- Homebrew, Snap, Flatpak, or AppImage distribution
+
+Third-party packages may use the supported `DESTDIR` interface.
+
+## Verification architecture
+
+Verification must use fake dependencies and isolated state.
+
+Tests must not:
+
+- access a real password store
+- decrypt real credentials
+- use production forge credentials
+- access normal parent CLI authentication state
+- contact GitHub
+- contact GitLab
+- require a production account
+- modify normal operator configuration
+
+### Shell matrix
+
+Syntax and behavior must be tested under:
+
+```text
+Dash
+Bash in POSIX mode
+BusyBox ash
+```
+
+### Static analysis
+
+ShellCheck is run with the POSIX shell dialect:
+
+```sh
+shellcheck --shell=sh src/gh-pass src/glab-pass
+```
+
+Suppressions must be narrow and documented.
+
+### `gh-pass` coverage
 
 Tests must cover:
 
-* missing dependencies
-* missing credential entry
-* empty credential
-* expected token extraction
-* argument forwarding
-* environment scoping
-* absence of token material from wrapper diagnostics
-* parent exit-status behavior
-* interaction with tracing or inherited shell state
-* absence of persistent wrapper-managed authentication state
+- default entry selection
+- explicit entry override
+- empty and invalid overrides
+- missing dependencies
+- pass retrieval failure
+- empty first line
+- first-line extraction
+- argument preservation
+- environment scoping
+- allowed authentication status
+- rejected authentication operations
+- token-display rejection
+- exact parent status through process replacement
+- absence of credential material from diagnostics
 
-### `glab-pass`
+### `glab-pass` coverage
 
 Tests must cover:
 
-* missing dependencies
-* missing or empty stored configuration
-* secure temporary-directory creation
-* runtime directory permissions
-* runtime file permissions
-* `GLAB_CONFIG_DIR` scoping
-* unchanged configuration
-* changed configuration
-* failed writeback
-* parent command success and failure
-* signal handling
-* cleanup behavior
-* output confidentiality
-* exit-status precedence
-* absence of persistent default-location authentication state
+- fixed staging beneath `/tmp`
+- isolation from `XDG_RUNTIME_DIR`
+- private directory creation
+- required permissions
+- opaque config restoration
+- initial validation
+- parent argument preservation
+- unchanged-state behavior
+- changed-state writeback after parent success
+- changed-state writeback after ordinary parent failure
+- invalid post-command state
+- writeback failure
+- cleanup failure
+- multiple wrapper failures
+- exact clean parent-status preservation
+- ordinary wrapper status `1`
+- handled `HUP`, `INT`, and `TERM`
+- child-process termination
+- signal-time unchanged state
+- signal-time changed eligible state
+- signal-time invalid state
+- signal-time writeback failure
+- signal-time cleanup failure
+- preservation of signal-derived statuses
+- absence of credential material from diagnostics
 
-### Cross-cutting verification
+### Installation coverage
 
-Tests must use:
+Tests must cover:
 
-* a temporary `HOME`
-* an isolated `PATH`
-* fake parent CLI binaries
-* a fake `pass`
-* no production password store
-* no network
-* no real forge credentials
+- `PREFIX`
+- `BINDIR`
+- `DESTDIR`
+- installed file modes
+- installed content identity
+- narrow uninstall behavior
+- safe development symlinks
+- guarded development uninstall
+- no credential access
+- no network access
+- operation from an unpacked source archive
 
-Static analysis and shell matrices must match the accepted runtime-language decision.
+### Primary verification entry point
 
-## 19. Known limitations
-
-The architecture does not prevent:
-
-* runtime process inspection by privileged actors
-* credentials existing in process memory
-* operating-system swap
-* filesystem or storage-layer forensic recovery
-* malicious behavior by trusted dependencies
-* parent CLI extensions from receiving credentials
-* parent CLIs from changing their credential interfaces
-* user commands that deliberately print credential material
-* misuse of valid credentials by an authorized local user
-* repository compromise affecting an installed development symlink
-
-Temporary deletion reduces ordinary persistence. It is not secure erasure.
-
-## 20. Open architecture decisions
-
-| Decision                              | Status   |
-| ------------------------------------- | -------- |
-| Provider-specific command model       | Accepted |
-| Public naming and terminology         | Accepted |
-| `pass` as authoritative durable store | Accepted |
-| Separation from SSH Git transport     | Accepted |
-| GitHub token-injection model          | Accepted |
-| GitLab temporary staging model        | Accepted |
-| Runtime shell language                | Open     |
-| Initial supported platforms           | Open     |
-| Public installation model             | Open     |
-| Credential-entry configuration model  | Open     |
-| Credential-management command policy  | Open     |
-| GitLab writeback after parent failure | Open     |
-| Change-detection mechanism            | Open     |
-| Exit-status precedence                | Open     |
-| Release and packaging model           | Open     |
-
-## 21. Decision records
-
-Material architecture decisions should be recorded under:
-
-```text
-docs/decisions/
+```sh
+make check
 ```
 
-Initial records should cover:
+This command is the supported local, CI, packaging, and release-preparation
+verification interface.
 
-1. provider-specific command model
-2. public naming and terminology
-3. `pass` as the authoritative durable credential store
-4. runtime language and platform support
-5. installation and distribution model
-6. credential-management command compatibility
-7. GitLab mutation and writeback policy
+## Expected repository structure
 
-Accepted decisions should be integrated into this document. Superseded decisions should remain available as historical records rather than being silently rewritten.
+The implementation is expected to converge on:
 
-## 22. Conformance
+```text
+forge-cli-pass/
+├── Makefile
+├── README.md
+├── CONTRIBUTING.md
+├── LICENSE
+├── SECURITY.md
+├── src/
+│   ├── gh-pass
+│   └── glab-pass
+├── tests/
+│   ├── fixtures/
+│   ├── helpers/
+│   ├── test-gh-pass.sh
+│   ├── test-glab-pass.sh
+│   ├── test-install.sh
+│   └── run.sh
+└── docs/
+    ├── architecture.md
+    ├── project-context.md
+    └── decisions/
+        ├── README.md
+        ├── 0001-provider-specific-commands.md
+        ├── 0002-project-identity-and-terminology.md
+        ├── 0003-pass-as-authoritative-store.md
+        ├── 0004-runtime-language-and-platform-support.md
+        ├── 0005-gitlab-runtime-state-and-writeback.md
+        ├── 0006-failure-and-exit-status-semantics.md
+        ├── 0007-signal-driven-gitlab-writeback.md
+        ├── 0008-credential-management-command-policy.md
+        ├── 0009-credential-entry-configuration.md
+        └── 0010-installation-and-distribution.md
+```
 
-An implementation conforms to this architecture only when:
+`SECURITY.md`, tests, and the final license may not exist during early
+implementation, but they are required before the first public release under the
+current distribution contract.
 
-* accepted invariants are reflected in code
-* behavioral tests exercise those invariants
-* documentation does not claim unsupported guarantees
-* unresolved decisions are not presented as settled features
-* credential lifecycle behavior matches the documented provider-specific flow
-* public installation and release artifacts match the accepted distribution model
+## Operational documentation boundary
+
+User-facing documentation must explain:
+
+- project purpose
+- threat model in practical terms
+- runtime dependencies
+- installation
+- default pass entries
+- environment overrides
+- GitHub credential bootstrap
+- GitLab credential bootstrap
+- authentication verification
+- supported and rejected `auth` operations
+- expected cleanup and writeback behavior
+- recovery after unusable GitLab state
+- distinction between forge API authentication and Git SSH authentication
+- uninstall behavior
+- limitations
+
+Bootstrap documentation must not encourage unisolated login behavior that
+recreates the original persistent-state problem.
+
+## Deferred decisions
+
+The following concerns are deferred and do not block wrapper implementation:
+
+- release versioning
+- tag signing
+- release checksums
+- provenance attestations
+- release automation
+- native package ownership
+- future non-Linux support
+- future alternate fingerprint utilities
+- future config-file support
+- structured machine-readable wrapper errors
+- expanded wrapper-specific exit codes
+- support for additional forges
+- support for additional GitLab authentication files
+- support for new parent `auth` subcommands
+- parent-global-option placements not included in the initial compatibility
+  tests
+
+A deferred concern requires a new or superseding decision when it would change
+an accepted public contract.
+
+## Implementation risks
+
+The principal remaining risks are implementation risks rather than unresolved
+system-purpose questions.
+
+### Signal coordination
+
+Portable child-process and signal coordination may differ among supported
+shells.
+
+The implementation must be driven by behavioral tests rather than assumed
+equivalence.
+
+### Argument classification
+
+The credential-management allowlist must fail closed without becoming a partial
+parent CLI parser or changing ordinary argument forwarding.
+
+### Cleanup verification
+
+Failure injection for `rm`, writeback, and simultaneous lifecycle failures must
+demonstrate the documented result model.
+
+### Opaque GitLab mutation
+
+A structurally valid config may still be semantically unusable after
+interruption.
+
+The wrapper can report and preserve durable state carefully, but it cannot prove
+OAuth correctness.
+
+### Parent CLI evolution
+
+A future parent release may:
+
+- change authentication environment behavior
+- add `auth` subcommands
+- change token-display options
+- store GitLab authentication state in additional files
+- alter its config update sequence
+
+Such changes require compatibility review and regression testing.
+
+## Architecture summary
+
+`forge-cli-pass` is a small Linux-focused credential-lifecycle boundary around
+GitHub CLI and GitLab CLI.
+
+`gh-pass` retrieves a GitHub token from a deterministic `pass` entry and injects
+it into one `gh` process through `GH_TOKEN`.
+
+`glab-pass` retrieves an opaque GitLab CLI configuration from a deterministic
+`pass` entry, stages it in a private directory beneath `/tmp`, executes `glab`,
+persists eligible changes, and removes the runtime state.
+
+Both wrappers:
+
+- use POSIX shell
+- validate non-baseline dependencies
+- preserve ordinary parent arguments
+- restrict credential-management commands
+- avoid credential-source fallback
+- report wrapper lifecycle failures
+- keep `pass` authoritative
+
+The architecture reduces routine persistent credential residue without claiming
+to provide isolation from the local user, the operating system, or trusted
+runtime components.
