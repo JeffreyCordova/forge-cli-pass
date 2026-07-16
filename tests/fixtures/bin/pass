@@ -1,0 +1,32 @@
+#!/bin/sh
+
+set -u
+
+: "${FAKE_PASS_CALL_LOG:?}"
+: "${FAKE_PASS_ENTRY_LOG:?}"
+: "${FAKE_PASS_PAYLOAD_FILE:?}"
+
+printf 'called\n' >>"$FAKE_PASS_CALL_LOG"
+
+if [ "$#" -ne 2 ] || [ "$1" != 'show' ]; then
+    printf 'fake pass: unexpected invocation\n' >&2
+    exit 64
+fi
+
+printf '%s' "$2" >"$FAKE_PASS_ENTRY_LOG"
+
+case ${FAKE_PASS_MODE:-show-ok} in
+    show-ok)
+        cat -- "$FAKE_PASS_PAYLOAD_FILE"
+        ;;
+
+    show-fail)
+        exit "${FAKE_PASS_STATUS:-1}"
+        ;;
+
+    *)
+        printf 'fake pass: unknown FAKE_PASS_MODE: %s\n' \
+            "$FAKE_PASS_MODE" >&2
+        exit 64
+        ;;
+esac

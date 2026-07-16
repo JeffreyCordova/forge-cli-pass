@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -u
+
+: "${FAKE_GH_CALLED_LOG:?}"
+: "${FAKE_GH_TOKEN_LOG:?}"
+: "${FAKE_GH_TOKEN_SET_LOG:?}"
+: "${FAKE_GH_ARGC_LOG:?}"
+: "${FAKE_GH_ARGS_LOG:?}"
+
+: >"$FAKE_GH_CALLED_LOG"
+
+printf '%s' "${GH_TOKEN+x}" >"$FAKE_GH_TOKEN_SET_LOG"
+printf '%s' "${GH_TOKEN-}" >"$FAKE_GH_TOKEN_LOG"
+printf '%s' "$#" >"$FAKE_GH_ARGC_LOG"
+
+: >"$FAKE_GH_ARGS_LOG"
+
+argument_number=1
+
+for argument do
+    printf '%s=%s\n' \
+        "$argument_number" \
+        "$argument" >>"$FAKE_GH_ARGS_LOG"
+
+    argument_number=$((argument_number + 1))
+done
+
+exit "${FAKE_GH_STATUS:-0}"
