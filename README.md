@@ -6,6 +6,7 @@ and GitLab CLI operations, with
 store.**
 
 [![CI](https://github.com/JeffreyCordova/forge-cli-pass/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JeffreyCordova/forge-cli-pass/actions/workflows/ci.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13640/badge)](https://www.bestpractices.dev/projects/13640)
 [![Latest release](https://img.shields.io/github/v/release/JeffreyCordova/forge-cli-pass?sort=semver)](https://github.com/JeffreyCordova/forge-cli-pass/releases/latest)
 [![License](https://img.shields.io/github/license/JeffreyCordova/forge-cli-pass)](LICENSE)
 
