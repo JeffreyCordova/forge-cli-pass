@@ -101,6 +101,61 @@ assert_not_exists() {
   [ ! -e "$path" ] || fail_assertion "$description: $path"
 }
 
+assert_file_not_contains() {
+  needle=$1
+  file=$2
+  description=${3:-unexpected text was found}
+
+  [ -f "$file" ] || {
+    printf '    assertion failed: expected file does not exist: %s\n' \
+      "$file" >&2
+    return 1
+  }
+
+  content=$(cat -- "$file") || {
+    printf '    assertion failed: could not read file: %s\n' \
+      "$file" >&2
+    return 1
+  }
+
+  case $content in
+  *"$needle"*)
+    printf '    assertion failed: %s\n' "$description" >&2
+    printf '      unexpected text: <%s>\n' "$needle" >&2
+    return 1
+    ;;
+
+  *)
+    return 0
+    ;;
+  esac
+}
+
+assert_files_equal() {
+  expected_file=$1
+  actual_file=$2
+  description=${3:-files differ}
+
+  [ -f "$expected_file" ] || {
+    printf '    assertion failed: expected source file does not exist: %s\n' \
+      "$expected_file" >&2
+    return 1
+  }
+
+  [ -f "$actual_file" ] || {
+    printf '    assertion failed: compared file does not exist: %s\n' \
+      "$actual_file" >&2
+    return 1
+  }
+
+  if ! cmp -s "$expected_file" "$actual_file"; then
+    printf '    assertion failed: %s\n' "$description" >&2
+    printf '      expected file: %s\n' "$expected_file" >&2
+    printf '      actual file:   %s\n' "$actual_file" >&2
+    return 1
+  fi
+}
+
 run_test() {
   test_name=$1
   test_function=$2

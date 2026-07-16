@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -u
+
+: "${REAL_SHA256SUM:?}"
+: "${FAKE_SHA256SUM_COUNT_FILE:?}"
+
+call_count=0
+
+if [ -f "$FAKE_SHA256SUM_COUNT_FILE" ]; then
+    IFS= read -r call_count <"$FAKE_SHA256SUM_COUNT_FILE" ||
+        call_count=0
+fi
+
+call_count=$((call_count + 1))
+printf '%s\n' "$call_count" >"$FAKE_SHA256SUM_COUNT_FILE"
+
+if [ "${FAKE_SHA256SUM_FAIL_ON_CALL:-0}" -eq "$call_count" ]; then
+    exit "${FAKE_SHA256SUM_STATUS:-1}"
+fi
+
+exec "$REAL_SHA256SUM" "$@"

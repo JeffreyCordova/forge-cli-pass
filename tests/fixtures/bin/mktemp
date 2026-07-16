@@ -1,0 +1,41 @@
+#!/bin/sh
+
+set -u
+
+: "${REAL_MKTEMP:?}"
+: "${FAKE_MKTEMP_ARGS_LOG:?}"
+: "${FAKE_MKTEMP_PATH_LOG:?}"
+
+: >"$FAKE_MKTEMP_ARGS_LOG"
+
+argument_number=1
+
+for argument do
+    printf '%s=%s\n' \
+        "$argument_number" \
+        "$argument" >>"$FAKE_MKTEMP_ARGS_LOG"
+
+    argument_number=$((argument_number + 1))
+done
+
+case ${FAKE_MKTEMP_MODE:-ok} in
+    ok)
+        ;;
+
+    fail)
+        exit "${FAKE_MKTEMP_STATUS:-1}"
+        ;;
+
+    *)
+        printf 'fake mktemp: unknown mode: %s\n' \
+            "$FAKE_MKTEMP_MODE" >&2
+        exit 64
+        ;;
+esac
+
+created_path=$(
+    "$REAL_MKTEMP" "$@"
+) || exit $?
+
+printf '%s' "$created_path" >"$FAKE_MKTEMP_PATH_LOG"
+printf '%s\n' "$created_path"

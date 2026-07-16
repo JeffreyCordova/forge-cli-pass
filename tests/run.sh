@@ -17,6 +17,10 @@ require_command() {
 require_command dash
 require_command bash
 require_command busybox
+require_command cmp
+require_command mktemp
+require_command sha256sum
+require_command stat
 
 busybox ash -c ':' >/dev/null 2>&1 || {
   printf 'tests: BusyBox ash is unavailable\n' >&2
@@ -35,8 +39,12 @@ run_matrix_entry() {
   TEST_SHELL_KIND=$shell_kind
   export TEST_SHELL_KIND
 
-  "$@" "$script_dir/test-gh-pass.sh" ||
-    overall_status=1
+  for test_script in \
+    "$script_dir/test-gh-pass.sh" \
+    "$script_dir/test-glab-pass.sh"; do
+    "$@" "$test_script" ||
+      overall_status=1
+  done
 }
 
 run_matrix_entry \

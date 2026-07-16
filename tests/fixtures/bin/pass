@@ -3,19 +3,28 @@
 set -u
 
 : "${FAKE_PASS_CALL_LOG:?}"
-: "${FAKE_PASS_ENTRY_LOG:?}"
-: "${FAKE_PASS_PAYLOAD_FILE:?}"
 
-printf 'called\n' >>"$FAKE_PASS_CALL_LOG"
-
-if [ "$#" -ne 2 ] || [ "$1" != 'show' ]; then
-    printf 'fake pass: unexpected invocation\n' >&2
+[ "$#" -gt 0 ] || {
+    printf 'fake pass: missing command\n' >&2
     exit 64
-fi
+}
 
-printf '%s' "$2" >"$FAKE_PASS_ENTRY_LOG"
+pass_command=$1
+printf '%s\n' "$pass_command" >>"$FAKE_PASS_CALL_LOG"
 
-case ${FAKE_PASS_MODE:-show-ok} in
+case $pass_command in
+show)
+    : "${FAKE_PASS_ENTRY_LOG:?}"
+    : "${FAKE_PASS_PAYLOAD_FILE:?}"
+
+    if [ "$#" -ne 2 ]; then
+        printf 'fake pass: unexpected show invocation\n' >&2
+        exit 64
+    fi
+
+    printf '%s' "$2" >"$FAKE_PASS_ENTRY_LOG"
+
+    case ${FAKE_PASS_MODE:-show-ok} in
     show-ok)
         cat -- "$FAKE_PASS_PAYLOAD_FILE"
         ;;
@@ -25,8 +34,86 @@ case ${FAKE_PASS_MODE:-show-ok} in
         ;;
 
     *)
-        printf 'fake pass: unknown FAKE_PASS_MODE: %s\n' \
+        printf 'fake pass: unknown show mode: %s\n' \
             "$FAKE_PASS_MODE" >&2
         exit 64
         ;;
+    esac
+    ;;
+
+insert)
+    : "${FAKE_PASS_WRITEBACK_CALL_LOG:?}"
+    : "${FAKE_PASS_WRITEBACK_ENTRY_LOG:?}"
+    : "${FAKE_PASS_WRITEBACK_PAYLOAD_FILE:?}"
+
+    printf 'called\n' >"$FAKE_PASS_WRITEBACK_CALL_LOG"
+
+    shift
+
+    force_enabled=0
+    multiline_enabled=0
+
+    while [ "$#" -gt 1 ]; do
+        case $1 in
+        --force | -f)
+            force_enabled=1
+            ;;
+
+        --multiline | -m)
+            multiline_enabled=1
+            ;;
+
+        -fm | -mf)
+            force_enabled=1
+            multiline_enabled=1
+            ;;
+
+        *)
+            printf 'fake pass: unexpected insert option: %s\n' \
+                "$1" >&2
+            exit 64
+            ;;
+        esac
+
+        shift
+    done
+
+    [ "$#" -eq 1 ] || {
+        printf 'fake pass: missing insert entry\n' >&2
+        exit 64
+    }
+
+    [ "$force_enabled" -eq 1 ] || {
+        printf 'fake pass: insert did not enable force\n' >&2
+        exit 64
+    }
+
+    [ "$multiline_enabled" -eq 1 ] || {
+        printf 'fake pass: insert did not enable multiline input\n' >&2
+        exit 64
+    }
+
+    printf '%s' "$1" >"$FAKE_PASS_WRITEBACK_ENTRY_LOG"
+
+    case ${FAKE_PASS_INSERT_MODE:-insert-ok} in
+    insert-ok)
+        cat >"$FAKE_PASS_WRITEBACK_PAYLOAD_FILE"
+        ;;
+
+    insert-fail)
+        exit "${FAKE_PASS_INSERT_STATUS:-1}"
+        ;;
+
+    *)
+        printf 'fake pass: unknown insert mode: %s\n' \
+            "$FAKE_PASS_INSERT_MODE" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+
+*)
+    printf 'fake pass: unexpected command: %s\n' "$pass_command" >&2
+    exit 64
+    ;;
 esac

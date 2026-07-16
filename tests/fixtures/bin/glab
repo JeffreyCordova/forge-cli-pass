@@ -1,0 +1,131 @@
+#!/bin/sh
+
+set -u
+
+: "${FAKE_GLAB_CALLED_LOG:?}"
+: "${FAKE_GLAB_CONFIG_DIR_LOG:?}"
+: "${FAKE_GLAB_CONFIG_PATH_LOG:?}"
+: "${FAKE_GLAB_CONFIG_SEEN_FILE:?}"
+: "${FAKE_GLAB_DIR_MODE_LOG:?}"
+: "${FAKE_GLAB_FILE_MODE_LOG:?}"
+: "${FAKE_GLAB_ARGC_LOG:?}"
+: "${FAKE_GLAB_ARGS_LOG:?}"
+: "${FAKE_GLAB_MUTATION_FILE:?}"
+: "${FAKE_GLAB_READY_LOG:?}"
+: "${FAKE_GLAB_SIGNAL_LOG:?}"
+
+: >"$FAKE_GLAB_CALLED_LOG"
+
+config_dir=${GLAB_CONFIG_DIR-}
+
+[ -n "$config_dir" ] || {
+    printf 'fake glab: GLAB_CONFIG_DIR is not set\n' >&2
+    exit 65
+}
+
+config_file=$config_dir/config.yml
+
+printf '%s' "$config_dir" >"$FAKE_GLAB_CONFIG_DIR_LOG"
+printf '%s' "$config_file" >"$FAKE_GLAB_CONFIG_PATH_LOG"
+
+stat -c '%a' -- "$config_dir" >"$FAKE_GLAB_DIR_MODE_LOG" || exit 66
+stat -c '%a' -- "$config_file" >"$FAKE_GLAB_FILE_MODE_LOG" || exit 66
+
+cat -- "$config_file" >"$FAKE_GLAB_CONFIG_SEEN_FILE" || exit 66
+
+printf '%s' "$#" >"$FAKE_GLAB_ARGC_LOG"
+: >"$FAKE_GLAB_ARGS_LOG"
+
+argument_number=1
+
+for argument do
+    printf '%s=%s\n' \
+        "$argument_number" \
+        "$argument" >>"$FAKE_GLAB_ARGS_LOG"
+
+    argument_number=$((argument_number + 1))
+done
+
+apply_state_action() {
+    state_action=$1
+
+    case $state_action in
+        unchanged)
+            ;;
+
+        change)
+            cat -- "$FAKE_GLAB_MUTATION_FILE" >"$config_file"
+            ;;
+
+        empty)
+            : >"$config_file"
+            ;;
+
+        remove)
+            rm -f -- "$config_file"
+            ;;
+
+        nonregular)
+            rm -f -- "$config_file" &&
+                mkdir -- "$config_file"
+            ;;
+
+        *)
+            printf 'fake glab: unknown state action: %s\n' \
+                "$state_action" >&2
+            exit 64
+            ;;
+    esac
+}
+
+handle_signal() {
+    signal_name=$1
+    signal_status=$2
+
+    printf '%s' "$signal_name" >"$FAKE_GLAB_SIGNAL_LOG"
+
+    apply_state_action "${FAKE_GLAB_SIGNAL_ACTION:-unchanged}" ||
+        exit 67
+
+    exit "${FAKE_GLAB_SIGNAL_CHILD_STATUS:-$signal_status}"
+}
+
+case ${FAKE_GLAB_MODE:-unchanged} in
+    unchanged)
+        ;;
+
+    change)
+        apply_state_action change
+        ;;
+
+    empty)
+        apply_state_action empty
+        ;;
+
+    remove)
+        apply_state_action remove
+        ;;
+
+    nonregular)
+        apply_state_action nonregular
+        ;;
+
+    wait-signal)
+        trap 'handle_signal HUP 129' HUP
+        trap 'handle_signal INT 130' INT
+        trap 'handle_signal TERM 143' TERM
+
+        : >"$FAKE_GLAB_READY_LOG"
+
+        while :; do
+            sleep 1
+        done
+        ;;
+
+    *)
+        printf 'fake glab: unknown mode: %s\n' "$FAKE_GLAB_MODE" >&2
+        exit 64
+        ;;
+esac
+
+exit "${FAKE_GLAB_STATUS:-0}"
