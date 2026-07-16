@@ -1,0 +1,107 @@
+#!/bin/sh
+
+# gh-pass
+#
+# Retrieve a GitHub API token from pass and scope it to one gh invocation.
+
+set +x
+umask 077
+
+program_name=${0##*/}
+
+default_pass_entry='forge-cli-pass/github/token'
+override_name='FORGE_CLI_PASS_GITHUB_ENTRY'
+
+die() {
+    printf '%s: %s\n' "$program_name" "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 ||
+        die "required command not found: $1"
+}
+
+enforce_auth_policy() {
+    [ "$#" -gt 0 ] || return 0
+    [ "$1" = 'auth' ] || return 0
+
+    shift
+
+    # `gh auth` displays command help and discovery information.
+    [ "$#" -gt 0 ] || return 0
+
+    case $1 in
+        -h | --help)
+            return 0
+            ;;
+
+        status)
+            shift
+
+            for argument do
+                case $argument in
+                    -t | --show-token)
+                        die \
+                            'credential disclosure is outside the wrapper compatibility contract'
+                        ;;
+                esac
+            done
+
+            return 0
+            ;;
+
+        *)
+            die "unsupported credential-management command: auth $1"
+            ;;
+    esac
+}
+
+resolve_pass_entry() {
+    if [ "${FORGE_CLI_PASS_GITHUB_ENTRY+x}" = x ]; then
+        [ -n "$FORGE_CLI_PASS_GITHUB_ENTRY" ] ||
+            die "$override_name is set but empty"
+
+        pass_entry=$FORGE_CLI_PASS_GITHUB_ENTRY
+    else
+        pass_entry=$default_pass_entry
+    fi
+
+    newline='
+'
+    carriage_return=$(printf '\r')
+
+    case $pass_entry in
+        *"$newline"*)
+            die "$override_name contains a newline"
+            ;;
+    esac
+
+    case $pass_entry in
+        *"$carriage_return"*)
+            die "$override_name contains a carriage return"
+            ;;
+    esac
+}
+
+enforce_auth_policy "$@"
+resolve_pass_entry
+
+require_command pass
+require_command gh
+
+credential=$(
+    command pass show "$pass_entry"
+) || die "failed to read credential entry: $pass_entry"
+
+token=${credential%%"$newline"*}
+
+[ -n "$token" ] ||
+    die "credential entry has an empty first line: $pass_entry"
+
+# Remove the complete pass payload before replacing the wrapper process. The
+# selected first-line token necessarily remains available for GH_TOKEN.
+credential=
+unset credential
+
+GH_TOKEN=$token exec gh "$@"
