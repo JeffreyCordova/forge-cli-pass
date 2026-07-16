@@ -17,6 +17,8 @@ BUSYBOX ?= busybox
 SOURCE_DIR := src
 PROGRAMS := gh-pass glab-pass
 SOURCES := $(addprefix $(SOURCE_DIR)/,$(PROGRAMS))
+CI_SCRIPTS := ci/build-test-busybox.sh
+SHELL_SOURCES := $(SOURCES) $(CI_SCRIPTS)
 
 INSTALL_DIR := $(DESTDIR)$(BINDIR)
 REPO_ROOT := $(shell pwd -P)
@@ -39,12 +41,12 @@ all: check
 check: lint syntax-check test
 
 lint:
-	"$(SHELLCHECK)" --shell=sh $(SOURCES)
+	"$(SHELLCHECK)" --shell=sh $(SHELL_SOURCES)
 
 syntax-check:
-	"$(DASH)" -n $(SOURCES)
-	"$(BASH)" --posix -n $(SOURCES)
-	"$(BUSYBOX)" ash -n $(SOURCES)
+	"$(DASH)" -n $(SHELL_SOURCES)
+	"$(BASH)" --posix -n $(SHELL_SOURCES)
+	"$(BUSYBOX)" ash -n $(SHELL_SOURCES)
 
 test:
 	BUSYBOX="$(BUSYBOX)" MAKE="$(MAKE)" "$(TEST_RUNNER)"

@@ -348,6 +348,16 @@ The current verification suite contains:
 - 8 installation and development-link tests
 - 149 total behavioral test executions
 
+### Continuous integration
+
+The primary GitHub repository runs the same `make check` interface for pull requests, pushes to `main`, and manual workflow runs.
+
+CI builds a pinned, test-only BusyBox `ash` executable whose configuration permits the failure-injection fixtures to take precedence through `PATH`. The downloaded source archive is verified before it is built.
+
+The workflow does not use forge credentials, password-store contents, or real authentication state.
+
+The GitLab repository is currently a mirror and does not run a duplicate pipeline.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)

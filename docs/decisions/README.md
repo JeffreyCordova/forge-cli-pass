@@ -17,12 +17,33 @@ The documentation authority order is:
    architecture and must remain consistent with accepted ADRs.
 3. [`../project-context.md`](../project-context.md) records the project's
    origin, problem statement, goals, and historical context.
-4. The root `README.md` provides a user-facing summary.
+4. The root [`README.md`](../../README.md) provides a user-facing summary.
 5. Code and tests demonstrate whether the implementation conforms to the
    documented architecture.
 
 When an accepted decision changes, add a new ADR that supersedes the earlier
 record. Do not silently rewrite the original decision history.
+
+## Decision index
+
+| ADR | Decision | Status |
+|---:|---|---|
+| 0001 | Provider-specific commands | Accepted |
+| 0002 | Project identity and terminology | Accepted |
+| 0003 | Use `pass` as the authoritative credential store | Accepted |
+| 0004 | Target POSIX `sh` on Linux | Accepted |
+| 0005 | Stage GitLab state in a private runtime directory | Accepted |
+| 0006 | Preserve parent status unless wrapper obligations fail | Accepted |
+| 0007 | Write back eligible GitLab state during handled signals | Accepted |
+| 0008 | Restrict credential-management commands | Accepted |
+| 0009 | Use default `pass` entries with explicit overrides | Accepted |
+| 0010 | Use copy-based installation and tagged source releases | Accepted |
+| 0011 | License the project under Apache-2.0 | Accepted |
+| 0012 | Verify the project in GitHub Actions | Accepted |
+
+The numbered ADR files in this directory are the authoritative records. This
+index is a navigation summary and must be updated whenever a record is added,
+superseded, deprecated, rejected, or otherwise changes status.
 
 ## Status values
 
