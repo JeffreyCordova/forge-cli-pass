@@ -358,6 +358,19 @@ The workflow does not use forge credentials, password-store contents, or real au
 
 The GitLab repository is currently a mirror and does not run a duplicate pipeline.
 
+## Versioning and releases
+
+`forge-cli-pass` uses [Semantic Versioning](https://semver.org/).
+
+Release versions are recorded in the root [`VERSION`](VERSION) file and use
+annotated `v`-prefixed Git tags, such as `v0.1.0`.
+
+The GitHub repository is the canonical release location. The GitLab repository
+mirrors release tags.
+
+Initial releases contain source only. See
+[`CHANGELOG.md`](CHANGELOG.md) for release history.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)

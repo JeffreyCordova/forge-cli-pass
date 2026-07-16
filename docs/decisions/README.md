@@ -40,6 +40,7 @@ record. Do not silently rewrite the original decision history.
 | 0010 | Use copy-based installation and tagged source releases | Accepted |
 | 0011 | License the project under Apache-2.0 | Accepted |
 | 0012 | Verify the project in GitHub Actions | Accepted |
+| 0013 | Version releases with SemVer and publish from annotated tags | Accepted |
 
 The numbered ADR files in this directory are the authoritative records. This
 index is a navigation summary and must be updated whenever a record is added,
