@@ -127,37 +127,61 @@ preserving signal-derived statuses `129`, `130`, and `143`.
 
 ## Architecture
 
+The project has two wrapper paths:
+
+- `gh-pass` reads a GitHub token from `pass`, selects the first line, and
+  executes `gh` with `GH_TOKEN` set only for that process.
+- `glab-pass` restores an opaque GitLab CLI config from `pass` into a private
+  runtime directory, runs `glab`, and conditionally writes back eligible
+  changed state.
+
+### Architecture overview
+
 ```mermaid
-flowchart LR
+flowchart TB
     S[User shell]
-    P[pass and GPG]
+    P[pass + GPG]
 
     GHP[gh-pass]
     GH[gh]
     GHS[GitHub]
 
     GLP[glab-pass]
-    T[Private /tmp staging]
+    T[Private runtime staging in /tmp]
     GL[glab]
     GLS[GitLab]
 
-    S -->|argv, stdin, environment| GHP
-    GHP -->|read token entry| P
-    P -->|first line| GHP
-    GHP -->|GH_TOKEN, argv, stdin| GH
+    S --> GHP
+    S --> GLP
+
+    GHP --> P
+    GHP --> GH
     GH --> GHS
 
-    S -->|argv, stdin, environment| GLP
-    GLP -->|read opaque config| P
-    P -->|complete config| GLP
-    GLP -->|create and protect| T
-    T -->|GLAB_CONFIG_DIR| GL
+    GLP --> P
+    GLP --> T
+    T --> GL
     GL --> GLS
-    GL -->|eligible changed config| T
-    T -->|conditional writeback| P
+    GL --> T
+    T --> P
 ```
 
 ### GitHub execution path
+
+```mermaid
+flowchart TB
+    U[Caller]
+    W[gh-pass]
+    P[Configured pass entry]
+    G[gh]
+    H[GitHub]
+
+    U -->|argv, stdin, environment| W
+    W -->|read entry| P
+    P -->|first line only| W
+    W -->|exec with GH_TOKEN| G
+    G --> H
+```
 
 For each accepted invocation, `gh-pass`:
 
@@ -167,12 +191,31 @@ For each accepted invocation, `gh-pass`:
 4. Selects the first line as the GitHub token.
 5. Rejects an empty first line.
 6. Clears the complete retrieved value.
-7. Replaces itself with `gh`, setting `GH_TOKEN` for that process.
+7. Replaces itself with `gh`, setting `GH_TOKEN` only for that process.
 
 Because the wrapper uses `exec`, ordinary `gh` process behavior and exit status
 are inherited directly.
 
 ### GitLab execution path
+
+```mermaid
+flowchart TB
+    U[Caller]
+    W[glab-pass]
+    P[Configured pass entry]
+    T[Private runtime directory]
+    G[glab]
+    H[GitLab]
+
+    U -->|argv, stdin, environment| W
+    W -->|read opaque config| P
+    P -->|restore config.yml| W
+    W -->|create and protect| T
+    T -->|GLAB_CONFIG_DIR| G
+    G --> H
+    G -->|eligible changed config| T
+    T -->|conditional writeback| P
+```
 
 For each accepted invocation, `glab-pass`:
 
